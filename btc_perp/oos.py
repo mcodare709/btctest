@@ -219,6 +219,21 @@ def run_catboost_purged_oos_evaluation(
             for label in class_ids
         }
         expected_return = sum(probability_by_class.get(label, 0.0) * class_mean_return[label] for label in class_ids)
+        context_start = max(0, fold.test_start - 40)
+        replay_frame = frame.iloc[context_start:fold.test_end]
+        def model_oos_signal(row: pd.Series, signal_config: BacktestConfig) -> tuple[float, int]:
+            if row.name < test_start:
+                return 0.5, 0
+            row_x = pd.DataFrame([{name: row.get(name, np.nan) for name in test_x.columns}])
+            raw = np.asarray(model.predict_proba(row_x), dtype=float)
+            calibrated_row = calibrator.transform(raw, class_ids)[0]
+            probability = {label: calibrated_row[position] for position, label in enumerate(class_ids)}
+            direction = 1 if probability.get(2, 0.0) >= signal_config.long_probability_threshold and probability.get(2, 0.0) > probability.get(0, 0.0) else -1 if probability.get(0, 0.0) >= 1.0 - signal_config.short_probability_threshold and probability.get(0, 0.0) > probability.get(2, 0.0) else 0
+            return float(probability.get(2, 0.0)), direction
+        replay = run_backtest(replay_frame, config=BacktestConfig(max_holding_bars=horizon_bars), signal_fn=model_oos_signal)
+        oos_equity = replay.equity_curve.loc[replay.equity_curve.index >= test_start]
+        oos_trades = replay.trades.loc[replay.trades["entry_time"] >= test_start] if not replay.trades.empty else replay.trades
+        trading_summary = calculate_metrics(oos_equity, oos_trades, 100.0)
         reports.append({
             "fold": number,
             "status": "ok",
@@ -230,6 +245,7 @@ def run_catboost_purged_oos_evaluation(
             "probability_calibration": calibration_metrics(up_probability, (test_y.to_numpy() == 2).astype(float)),
             "feature_importance": {name: float(value) for name, value in zip(test_x.columns, model.get_feature_importance())},
             "expected_return_calibration": expected_return_calibration(expected_return, realized_return),
+            "trading": trading_summary,
         })
         calibrator.observe(probabilities, test_y.to_numpy())
     return {"folds": reports, "fold_count": len(reports), "horizon_bars": horizon_bars, "purge_bars": purge_bars}
