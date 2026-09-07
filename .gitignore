@@ -12,3 +12,6 @@ venv/
 
 # Model artifacts may be large and are reproducible from training data
 *.cbm
+
+dashboard/.paper_state.json
+build/

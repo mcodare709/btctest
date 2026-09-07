@@ -23,6 +23,8 @@ from typing import Any
 from urllib.request import urlopen
 from urllib.parse import urlparse
 
+from cpp_core import MarketFeatures, StrategyCore
+
 try:
     import websocket
 except ImportError:  # pragma: no cover - reported in the engine status
@@ -396,6 +398,7 @@ class HFTPaperEngine:
         self.last_close_at = 0
         self.last_checkpoint = time.monotonic()
         self.last_funding_poll = 0.0
+        self.strategy = StrategyCore()
         self.decision_count = 0
         self.connected = False
         self.error = "尚未連線"
@@ -427,6 +430,7 @@ class HFTPaperEngine:
         # thread; returning primitives avoids lock inversion with the state API.
         return {
             "mode": "hft",
+            "decisionBackend": self.strategy.backend,
             "connected": self.connected,
             "error": self.error,
             "lastPrice": self.last_price,
@@ -584,31 +588,22 @@ class HFTPaperEngine:
         self._trim(now_ms)
         self._poll_funding()
         ret5, flow, book, vol_bps, spread_bps = self._metrics(now_ms)
+        decision = self.strategy.evaluate(
+            MarketFeatures(ret5, flow, book, vol_bps, spread_bps),
+            self.candidate_direction,
+            self.candidate_count,
+        )
         volatility = max(vol_bps / 10_000, 0.0005)
-        score = 2.5 * (ret5 / volatility) + 2.0 * flow + 1.5 * book
-        probability = self._sigmoid(score)
-        raw_direction = 1 if probability > HFT_ENTRY_PROB else -1 if probability < (1.0 - HFT_ENTRY_PROB) else 0
-        round_trip_cost_bps = 2.0 * (HFT_FEE_BPS + HFT_SLIPPAGE_BPS) + spread_bps
-        confidence = abs(2.0 * probability - 1.0)
-        gross_edge_bps = confidence * max(2.0 * vol_bps, HFT_MIN_MOVE_BPS)
-        expected_edge_bps = gross_edge_bps - round_trip_cost_bps
-        direction = raw_direction if expected_edge_bps >= HFT_MIN_EDGE_BPS else 0
-        if direction and direction == self.candidate_direction:
-            self.candidate_count += 1
-        elif direction:
-            self.candidate_direction = direction
-            self.candidate_count = 1
-        else:
-            self.candidate_direction = 0
-            self.candidate_count = 0
-        confirmed_direction = direction if self.candidate_count >= HFT_CONFIRMATIONS else 0
-        self.score = score
-        self.probability = probability
-        self.direction = direction
-        self.raw_direction = raw_direction
-        self.gross_edge_bps = gross_edge_bps
-        self.expected_edge_bps = expected_edge_bps
-        self.round_trip_cost_bps = round_trip_cost_bps
+        confirmed_direction = decision.confirmed_direction
+        self.candidate_direction = decision.candidate_direction
+        self.candidate_count = decision.candidate_count
+        self.score = decision.score
+        self.probability = decision.probability_up
+        self.direction = decision.direction
+        self.raw_direction = decision.raw_direction
+        self.gross_edge_bps = decision.gross_edge_bps
+        self.expected_edge_bps = decision.expected_edge_bps
+        self.round_trip_cost_bps = decision.round_trip_cost_bps
         self.spread_bps = spread_bps
         self.flow_imbalance = flow
         self.book_imbalance = book
