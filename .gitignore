@@ -16,3 +16,6 @@ venv/
 dashboard/.paper_state.json
 build/
 tools/
+
+# Downloaded market-data archives (local research assets)
+data/
