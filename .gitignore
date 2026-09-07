@@ -1,0 +1,14 @@
+# Local paper-trading runtime state and generated backtest artifacts
+.btc_paper_state.json
+.btc_paper_state.bak
+outputs/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Model artifacts may be large and are reproducible from training data
+*.cbm
