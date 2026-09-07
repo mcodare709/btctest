@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, precision_recall_fscore_support
 
+from .calibration import PriorOOSIsotonic
 from .config import BacktestConfig
 from .data import validate_market_data
 from .engine import run_backtest
@@ -189,6 +190,7 @@ def run_catboost_purged_oos_evaluation(
     all_net_returns = net_horizon_returns(frame, horizon_bars, fee_rate=0.0004, slippage_bps=1.0, default_spread_bps=2.0)
     classifier = _catboost()
     reports: list[dict[str, Any]] = []
+    calibrator = PriorOOSIsotonic()
     for number, fold in enumerate(folds):
         train_frame = frame.iloc[fold.train_start:fold.train_end]
         train_x, train_y = make_supervised_dataset(train_frame, horizon_bars=horizon_bars)
@@ -203,7 +205,9 @@ def run_catboost_purged_oos_evaluation(
         model.fit(train_x, train_y, verbose=False)
         probabilities = np.asarray(model.predict_proba(test_x), dtype=float)
         class_ids = np.asarray(model.classes_, dtype=int)
-        probability_by_class = {label: probabilities[:, position] for position, label in enumerate(class_ids)}
+        calibration_rows = calibrator.rows
+        calibrated = calibrator.transform(probabilities, class_ids)
+        probability_by_class = {label: calibrated[:, position] for position, label in enumerate(class_ids)}
         up_probability = probability_by_class.get(2, np.zeros(len(test_x)))
         test_net = all_net_returns.loc[test_x.index]
         train_net = all_net_returns.loc[train_x.index]
@@ -221,9 +225,11 @@ def run_catboost_purged_oos_evaluation(
             "split": asdict(fold),
             "train_rows": len(train_x),
             "oos_rows": len(test_x),
-            "classification": classification_report(test_y.to_numpy(), probabilities, class_ids),
+            "classification": classification_report(test_y.to_numpy(), calibrated, class_ids),
+            "calibration_source_oos_rows": calibration_rows,
             "probability_calibration": calibration_metrics(up_probability, (test_y.to_numpy() == 2).astype(float)),
             "feature_importance": {name: float(value) for name, value in zip(test_x.columns, model.get_feature_importance())},
             "expected_return_calibration": expected_return_calibration(expected_return, realized_return),
         })
+        calibrator.observe(probabilities, test_y.to_numpy())
     return {"folds": reports, "fold_count": len(reports), "horizon_bars": horizon_bars, "purge_bars": purge_bars}
