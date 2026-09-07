@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
-from typing import Any
+from dataclasses import asdict, replace
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -90,3 +90,47 @@ def _run_fold(
         "summary": summary,
         "benchmarks": benchmark_returns(market_data.iloc[fold.test_start : fold.test_end], seed=42 + fold_index),
     }
+
+def run_parameter_sensitivity(
+    market_data: pd.DataFrame,
+    *,
+    config: BacktestConfig,
+    parameter_sets: Mapping[str, Mapping[str, Any]],
+    train_bars: int,
+    test_bars: int,
+    purge_bars: int,
+    warmup_bars: int = 40,
+) -> dict[str, dict[str, Any]]:
+    """Evaluate named BacktestConfig variants using the same purged OOS folds.
+
+    This does not select a winner. It exposes whether the observed OOS result
+    remains similar across nearby, pre-declared assumptions.
+    """
+
+    allowed_fields = set(BacktestConfig.__dataclass_fields__)
+    results: dict[str, dict[str, Any]] = {}
+    for name, overrides in parameter_sets.items():
+        unknown = sorted(set(overrides) - allowed_fields)
+        if unknown:
+            raise ValueError(f"{name}: unknown BacktestConfig fields: {unknown}")
+        report = run_purged_oos_backtest(
+            market_data,
+            config=replace(config, **dict(overrides)),
+            train_bars=train_bars,
+            test_bars=test_bars,
+            purge_bars=purge_bars,
+            warmup_bars=warmup_bars,
+        )
+        summaries = [fold["summary"] for fold in report["folds"]]
+        total_returns = np.array([float(summary["total_return"]) for summary in summaries])
+        drawdowns = np.array([float(summary["max_drawdown"]) for summary in summaries])
+        results[name] = {
+            "overrides": dict(overrides),
+            "fold_count": report["fold_count"],
+            "mean_fold_return": float(total_returns.mean()),
+            "median_fold_return": float(np.median(total_returns)),
+            "profitable_fold_fraction": float((total_returns > 0).mean()),
+            "mean_fold_max_drawdown": float(drawdowns.mean()),
+            "oos_report": report,
+        }
+    return results

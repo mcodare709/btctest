@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 
 from .config import BacktestConfig, DEFAULT_EXPERIMENTS
-from .data import load_market_csv
+from .data import load_market_csv, resample_market_data
 from .engine import run_backtest
 from .ml_model import CatBoostBundle, train_catboost
+from .oos import run_purged_oos_backtest
 
 
 def _write_result(result, output_dir: Path, name: str | None = None) -> None:
@@ -38,6 +39,16 @@ def main() -> None:
     compare.add_argument("--data", required=True, type=Path)
     compare.add_argument("--output-dir", required=True, type=Path)
 
+    oos = subparsers.add_parser("evaluate-oos")
+    oos.add_argument("--data", required=True, type=Path)
+    oos.add_argument("--output-dir", required=True, type=Path)
+    oos.add_argument("--timeframe", default="30s")
+    oos.add_argument("--train-bars", required=True, type=int)
+    oos.add_argument("--test-bars", required=True, type=int)
+    oos.add_argument("--purge-bars", required=True, type=int)
+    oos.add_argument("--warmup-bars", default=40, type=int)
+    oos.add_argument("--horizon-bars", default=10, type=int)
+
     train = subparsers.add_parser("train-model")
     train.add_argument("--data", required=True, type=Path)
     train.add_argument("--horizon-bars", type=int, default=10)
@@ -62,6 +73,24 @@ def main() -> None:
             signal_fn=bundle.signal if bundle else None,
         )
         _write_result(result, args.output_dir)
+        return
+
+    if args.command == "evaluate-oos":
+        config = BacktestConfig(max_holding_bars=args.horizon_bars)
+        evaluation_data = resample_market_data(market_data, args.timeframe)
+        report = run_purged_oos_backtest(
+            evaluation_data,
+            config=config,
+            train_bars=args.train_bars,
+            test_bars=args.test_bars,
+            purge_bars=args.purge_bars,
+            warmup_bars=args.warmup_bars,
+        )
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        output = args.output_dir / "oos_report.json"
+        output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(json.dumps(report, indent=2))
+        print(f"Wrote OOS-only report: {output}")
         return
 
     comparison = []
