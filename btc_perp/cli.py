@@ -10,7 +10,7 @@ from .config import BacktestConfig, DEFAULT_EXPERIMENTS
 from .data import load_market_csv, resample_market_data
 from .engine import run_backtest
 from .ml_model import CatBoostBundle, train_catboost
-from .oos import run_purged_oos_backtest
+from .oos import run_catboost_purged_oos_evaluation, run_purged_oos_backtest
 
 
 def _write_result(result, output_dir: Path, name: str | None = None) -> None:
@@ -49,6 +49,15 @@ def main() -> None:
     oos.add_argument("--warmup-bars", default=40, type=int)
     oos.add_argument("--horizon-bars", default=10, type=int)
 
+    model_oos = subparsers.add_parser("evaluate-oos-model")
+    model_oos.add_argument("--data", required=True, type=Path)
+    model_oos.add_argument("--output-dir", required=True, type=Path)
+    model_oos.add_argument("--timeframe", default="30s")
+    model_oos.add_argument("--train-bars", required=True, type=int)
+    model_oos.add_argument("--test-bars", required=True, type=int)
+    model_oos.add_argument("--purge-bars", required=True, type=int)
+    model_oos.add_argument("--horizon-bars", default=10, type=int)
+    model_oos.add_argument("--iterations", default=400, type=int)
     train = subparsers.add_parser("train-model")
     train.add_argument("--data", required=True, type=Path)
     train.add_argument("--horizon-bars", type=int, default=10)
@@ -75,6 +84,21 @@ def main() -> None:
         _write_result(result, args.output_dir)
         return
 
+    if args.command == "evaluate-oos-model":
+        evaluation_data = resample_market_data(market_data, args.timeframe)
+        report = run_catboost_purged_oos_evaluation(
+            evaluation_data,
+            horizon_bars=args.horizon_bars,
+            train_bars=args.train_bars,
+            test_bars=args.test_bars,
+            purge_bars=args.purge_bars,
+            iterations=args.iterations,
+        )
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        output = args.output_dir / "catboost_oos_report.json"
+        output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Wrote CatBoost OOS-only report: {output}")
+        return
     if args.command == "evaluate-oos":
         config = BacktestConfig(max_holding_bars=args.horizon_bars)
         evaluation_data = resample_market_data(market_data, args.timeframe)

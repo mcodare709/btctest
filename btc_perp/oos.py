@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, precision_recall_fscore_support
 
 from .config import BacktestConfig
 from .data import validate_market_data
@@ -14,7 +15,7 @@ from .engine import run_backtest
 from .evaluation import calibration_metrics, expected_return_calibration, WalkForwardFold, purged_walk_forward_splits
 from .metrics import calculate_metrics
 from .ml_model import _catboost, make_supervised_dataset
-from .protocol import next_open_horizon_return
+from .protocol import net_horizon_returns
 from .signals import cost_aware_baseline_signal
 
 
@@ -137,6 +138,30 @@ def run_parameter_sensitivity(
         }
     return results
 
+
+
+def classification_report(y_true: np.ndarray, probabilities: np.ndarray, class_ids: np.ndarray) -> dict[str, Any]:
+    """Standard multiclass OOS metrics plus confidence reliability buckets."""
+    truth = np.asarray(y_true, dtype=int)
+    predicted = class_ids[np.argmax(probabilities, axis=1)]
+    labels = np.array([0, 1, 2])
+    precision, recall, f1, support = precision_recall_fscore_support(truth, predicted, labels=labels, zero_division=0)
+    confidence = probabilities.max(axis=1)
+    buckets = []
+    for low in np.arange(0.5, 1.0, 0.1):
+        high = min(low + 0.1, 1.0)
+        mask = (confidence >= low) & ((confidence < high) if high < 1.0 else (confidence <= high))
+        if mask.any():
+            buckets.append({"range": f"{low:.2f}-{high:.2f}", "count": int(mask.sum()), "mean_confidence": float(confidence[mask].mean()), "accuracy": float((predicted[mask] == truth[mask]).mean())})
+    return {
+        "confusion_matrix": confusion_matrix(truth, predicted, labels=labels).astype(int).tolist(),
+        "class_distribution": {str(label): int((truth == label).sum()) for label in labels},
+        "prediction_distribution": {str(label): int((predicted == label).sum()) for label in labels},
+        "per_class": {str(label): {"precision": float(precision[i]), "recall": float(recall[i]), "f1": float(f1[i]), "support": int(support[i])} for i, label in enumerate(labels)},
+        "macro_f1": float(f1.mean()),
+        "balanced_accuracy": float(balanced_accuracy_score(truth, predicted)),
+        "confidence_buckets": buckets,
+    }
 def run_catboost_purged_oos_evaluation(
     market_data: pd.DataFrame,
     *,
@@ -161,7 +186,7 @@ def run_catboost_purged_oos_evaluation(
     if not folds:
         raise ValueError("not enough rows for one purged walk-forward fold")
     all_x, all_y = make_supervised_dataset(frame, horizon_bars=horizon_bars)
-    all_returns = next_open_horizon_return(frame, horizon_bars)
+    all_net_returns = net_horizon_returns(frame, horizon_bars, fee_rate=0.0004, slippage_bps=1.0, default_spread_bps=2.0)
     classifier = _catboost()
     reports: list[dict[str, Any]] = []
     for number, fold in enumerate(folds):
@@ -180,8 +205,15 @@ def run_catboost_purged_oos_evaluation(
         class_ids = np.asarray(model.classes_, dtype=int)
         probability_by_class = {label: probabilities[:, position] for position, label in enumerate(class_ids)}
         up_probability = probability_by_class.get(2, np.zeros(len(test_x)))
-        realized_return = all_returns.loc[test_x.index].to_numpy(dtype=float)
-        class_mean_return = {label: float(all_returns.loc[train_x.index][train_y == label].mean()) for label in class_ids}
+        test_net = all_net_returns.loc[test_x.index]
+        train_net = all_net_returns.loc[train_x.index]
+        long_net = test_net["long_net_return"].to_numpy(dtype=float)
+        short_net = test_net["short_net_return"].to_numpy(dtype=float)
+        realized_return = np.where(test_y.to_numpy() == 0, short_net, long_net)
+        class_mean_return = {
+            label: float((train_net["short_net_return"] if label == 0 else train_net["long_net_return"])[train_y == label].mean())
+            for label in class_ids
+        }
         expected_return = sum(probability_by_class.get(label, 0.0) * class_mean_return[label] for label in class_ids)
         reports.append({
             "fold": number,
@@ -189,7 +221,9 @@ def run_catboost_purged_oos_evaluation(
             "split": asdict(fold),
             "train_rows": len(train_x),
             "oos_rows": len(test_x),
+            "classification": classification_report(test_y.to_numpy(), probabilities, class_ids),
             "probability_calibration": calibration_metrics(up_probability, (test_y.to_numpy() == 2).astype(float)),
+            "feature_importance": {name: float(value) for name, value in zip(test_x.columns, model.get_feature_importance())},
             "expected_return_calibration": expected_return_calibration(expected_return, realized_return),
         })
     return {"folds": reports, "fold_count": len(reports), "horizon_bars": horizon_bars, "purge_bars": purge_bars}
