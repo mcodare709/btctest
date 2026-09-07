@@ -41,13 +41,15 @@ def main() -> None:
     train = subparsers.add_parser("train-model")
     train.add_argument("--data", required=True, type=Path)
     train.add_argument("--horizon-bars", type=int, default=10)
+    train.add_argument("--timeframe", default="30s")
+    train.add_argument("--data-source", default="unknown")
     train.add_argument("--output", required=True, type=Path)
 
     args = parser.parse_args()
     market_data = load_market_csv(args.data)
 
     if args.command == "train-model":
-        print(json.dumps(train_catboost(market_data, args.output, horizon_bars=args.horizon_bars), indent=2))
+        print(json.dumps(train_catboost(market_data, args.output, horizon_bars=args.horizon_bars, timeframe=args.timeframe, data_source=args.data_source), indent=2))
         return
 
     if args.command == "backtest":

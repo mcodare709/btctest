@@ -17,6 +17,7 @@ import pandas as pd
 from .config import BacktestConfig
 from .data import validate_market_data
 from .features import build_features
+from .protocol import EXECUTION_PROTOCOL_VERSION, infer_timeframe, next_open_horizon_return
 
 
 MODEL_FEATURES = (
@@ -76,14 +77,14 @@ def make_supervised_dataset(
     """Build leakage-safe features and ``down/flat/up`` labels.
 
     The flat class covers future returns that do not clear estimated round-trip
-    costs plus a small edge buffer. Labels use future close only for the target;
+    costs plus a small edge buffer. Labels use next-bar-open execution for the target;
     all model features are current-row or backward-looking.
     """
 
     if horizon_bars <= 0:
         raise ValueError("horizon_bars must be positive")
     features = _feature_frame(market_data)
-    future_return = features["close"].shift(-horizon_bars) / features["close"] - 1.0
+    future_return = next_open_horizon_return(features, horizon_bars)
     cost_band_bps = 2.0 * (fee_rate * 10_000.0 + slippage_bps) + default_spread_bps + min_edge_bps
     cost_band = cost_band_bps / 10_000.0
 
