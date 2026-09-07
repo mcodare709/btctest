@@ -106,20 +106,33 @@ def make_supervised_dataset(
 class CatBoostBundle:
     model: Any
     feature_names: tuple[str, ...] = MODEL_FEATURES
+    metadata: dict[str, Any] | None = None
 
     @classmethod
-    def load(cls, path: str | Path) -> "CatBoostBundle":
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        expected_timeframe: str | None = None,
+        expected_horizon_bars: int | None = None,
+    ) -> "CatBoostBundle":
         classifier = _catboost()
         model = classifier()
         model.load_model(str(path))
         metadata_path = Path(path).with_suffix(".json")
-        feature_names = MODEL_FEATURES
-        if metadata_path.exists():
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            feature_names = tuple(metadata.get("feature_names", MODEL_FEATURES))
+        if not metadata_path.exists():
+            raise ValueError("model metadata is required for timeframe and horizon validation")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        feature_names = tuple(metadata.get("feature_names", MODEL_FEATURES))
         if tuple(feature_names) != MODEL_FEATURES:
             raise ValueError("model feature schema does not match current feature engineering")
-        return cls(model=model, feature_names=feature_names)
+        if metadata.get("execution_protocol") != EXECUTION_PROTOCOL_VERSION:
+            raise ValueError("model execution protocol does not match current backtest semantics")
+        if expected_timeframe is not None and metadata.get("timeframe") != expected_timeframe:
+            raise ValueError("model timeframe does not match requested inference timeframe")
+        if expected_horizon_bars is not None and metadata.get("horizon_bars") != expected_horizon_bars:
+            raise ValueError("model horizon does not match requested inference horizon")
+        return cls(model=model, feature_names=feature_names, metadata=metadata)
 
     def _row_frame(self, row: pd.Series) -> pd.DataFrame:
         values = {name: row.get(name, 0.0) for name in self.feature_names}
@@ -188,6 +201,17 @@ def train_catboost(
     path.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(str(path))
     metadata = {
+        "execution_protocol": EXECUTION_PROTOCOL_VERSION,
+        "timeframe": resolved_timeframe,
+        "data_source": data_source,
+        "train_start": x.index[0].isoformat(),
+        "train_end": x.index[train_end - 1].isoformat(),
+        "cost_assumptions": {
+            "fee_rate": 0.0004,
+            "slippage_bps": 1.0,
+            "default_spread_bps": 2.0,
+            "min_edge_bps": 2.0,
+        },
         "feature_names": list(MODEL_FEATURES),
         "horizon_bars": horizon_bars,
         "target_classes": {"0": "down", "1": "flat", "2": "up"},

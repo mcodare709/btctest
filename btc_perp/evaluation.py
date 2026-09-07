@@ -61,3 +61,24 @@ def calibration_metrics(probabilities: np.ndarray, outcomes: np.ndarray, bins: i
         if mask.any():
             ece += float(mask.mean() * abs(probability[mask].mean() - outcome[mask].mean()))
     return {"brier_score": brier, "expected_calibration_error": ece}
+
+def expected_return_calibration(
+    expected_returns: np.ndarray, realized_returns: np.ndarray, bins: int = 10
+) -> dict[str, float]:
+    """Measure whether OOS expected returns agree with realized next-open returns."""
+
+    expected = np.asarray(expected_returns, dtype=float)
+    realized = np.asarray(realized_returns, dtype=float)
+    if expected.ndim != 1 or realized.ndim != 1 or len(expected) != len(realized) or len(expected) == 0:
+        raise ValueError("expected_returns and realized_returns must be equal-length non-empty vectors")
+    if bins <= 0 or not np.isfinite(expected).all() or not np.isfinite(realized).all():
+        raise ValueError("returns must be finite and bins positive")
+    error = expected - realized
+    ordering = np.argsort(expected)
+    chunks = np.array_split(ordering, bins)
+    bin_error = [abs(float(error[index].mean())) for index in chunks if len(index)]
+    return {
+        "expected_return_mae": float(np.mean(np.abs(error))),
+        "expected_return_rmse": float(np.sqrt(np.mean(error**2))),
+        "expected_return_calibration_error": float(np.mean(bin_error)),
+    }

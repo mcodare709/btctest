@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 from btc_perp.config import BacktestConfig
-from btc_perp.ml_model import MODEL_FEATURES, make_supervised_dataset
+from btc_perp.ml_model import EXECUTION_PROTOCOL_VERSION, MODEL_FEATURES, CatBoostBundle, make_supervised_dataset
 from btc_perp.signals import cost_aware_baseline_signal
 
 
@@ -60,6 +64,28 @@ class MLModelTests(unittest.TestCase):
         self.assertEqual(direction, 0)
         self.assertLessEqual(edge_bps, 0.0)
 
+    def test_model_load_rejects_timeframe_mismatch(self) -> None:
+        class FakeClassifier:
+            def load_model(self, path: str) -> None:
+                self.loaded_path = path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.cbm"
+            path.write_text("placeholder", encoding="utf-8")
+            path.with_suffix(".json").write_text(
+                json.dumps(
+                    {
+                        "execution_protocol": EXECUTION_PROTOCOL_VERSION,
+                        "timeframe": "30s",
+                        "horizon_bars": 10,
+                        "feature_names": list(MODEL_FEATURES),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("btc_perp.ml_model._catboost", return_value=FakeClassifier):
+                with self.assertRaisesRegex(ValueError, "timeframe"):
+                    CatBoostBundle.load(path, expected_timeframe="5min", expected_horizon_bars=10)
 
 if __name__ == "__main__":
     unittest.main()

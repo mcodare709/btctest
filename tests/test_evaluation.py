@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from btc_perp.evaluation import calibration_metrics, purged_walk_forward_splits
+from btc_perp.evaluation import calibration_metrics, expected_return_calibration, purged_walk_forward_splits
 
 
 class EvaluationTests(unittest.TestCase):
@@ -20,3 +20,7 @@ class EvaluationTests(unittest.TestCase):
         result = calibration_metrics(np.array([0.0, 1.0]), np.array([0.0, 1.0]))
         self.assertEqual(result["brier_score"], 0.0)
         self.assertEqual(result["expected_calibration_error"], 0.0)
+    def test_expected_return_calibration(self) -> None:
+        result = expected_return_calibration(np.array([0.01, -0.01]), np.array([0.01, -0.01]), bins=2)
+        self.assertEqual(result["expected_return_mae"], 0.0)
+        self.assertEqual(result["expected_return_rmse"], 0.0)
