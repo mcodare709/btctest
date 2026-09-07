@@ -7,6 +7,7 @@ signal therefore enters at ``open[t + 1]``. Holding ``N`` bars exits at
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -40,3 +41,47 @@ def infer_timeframe(frame: pd.DataFrame) -> str:
         raise ValueError("model training data must have a regular bar timeframe")
     seconds = int(interval.total_seconds())
     return f"{seconds}s" if seconds < 60 else f"{seconds // 60}min"
+
+def net_horizon_returns(
+    frame: pd.DataFrame,
+    horizon_bars: int,
+    *,
+    fee_rate: float,
+    slippage_bps: float,
+    default_spread_bps: float,
+) -> pd.DataFrame:
+    """Return executable long/short net returns under the bar backtest cost model.
+
+    Signal t enters at open[t+1] and exits at open[t+1+horizon]. Funding is
+    charged only for known event rows strictly after entry through exit open,
+    matching the engine's event ordering.  Stop/liquidation path labels remain
+    a future extension requiring intrabar event data.
+    """
+
+    gross_long = next_open_horizon_return(frame, horizon_bars)
+    entry_open = frame["open"].shift(-1)
+    exit_open = frame["open"].shift(-(horizon_bars + 1))
+    if {"bid_price", "ask_price"}.issubset(frame.columns):
+        spread = (frame["ask_price"] - frame["bid_price"]) / frame["close"] * 10_000.0
+    else:
+        spread = pd.Series(default_spread_bps, index=frame.index, dtype=float)
+    entry_spread = spread.shift(-1).fillna(default_spread_bps)
+    exit_spread = spread.shift(-(horizon_bars + 1)).fillna(default_spread_bps)
+    round_trip_cost = 2.0 * (fee_rate + slippage_bps / 10_000.0) + (entry_spread + exit_spread) / 20_000.0
+    funding = pd.Series(0.0, index=frame.index)
+    if "funding_rate" in frame.columns:
+        rates = frame["funding_rate"].fillna(0.0).astype(float)
+        for offset in range(2, horizon_bars + 2):
+            funding += rates.shift(-offset).fillna(0.0)
+    return pd.DataFrame(
+        {
+            "long_net_return": gross_long - round_trip_cost - funding,
+            "short_net_return": -gross_long - round_trip_cost + funding,
+            "gross_long_return": gross_long,
+            "round_trip_cost": round_trip_cost,
+            "funding_long": funding,
+            "entry_open": entry_open,
+            "exit_open": exit_open,
+        },
+        index=frame.index,
+    ).replace([np.inf, -np.inf], np.nan)

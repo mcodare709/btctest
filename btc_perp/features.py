@@ -84,4 +84,37 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
 
     if "funding_rate" not in result.columns:
         result["funding_rate"] = np.nan
+    # Preserve missing feeds as NaN and expose their availability explicitly.
+    result["has_orderbook"] = int({"bid_price", "ask_price", "bid_size", "ask_size"}.issubset(result.columns))
+    result["has_open_interest"] = int("open_interest" in result.columns)
+    result["has_liquidation"] = int("liquidation_volume" in result.columns)
+    result["has_long_short_ratio"] = int("long_short_ratio" in result.columns)
+    result["has_funding"] = int("funding_rate" in result.columns)
+    result["latest_known_funding_rate"] = result["funding_rate"].ffill()
+    result["funding_change"] = result["latest_known_funding_rate"].diff()
+    result["funding_zscore"] = (result["latest_known_funding_rate"] - result["latest_known_funding_rate"].rolling(100, min_periods=20).mean()) / result["latest_known_funding_rate"].rolling(100, min_periods=20).std().replace(0, np.nan)
+    result["mark_index_basis_bps"] = ((result["mark_price"] / result["index_price"] - 1.0) * 10_000.0 if {"mark_price", "index_price"}.issubset(result.columns) else np.nan)
+    result["premium_index"] = result["premium_index"] if "premium_index" in result.columns else result["mark_index_basis_bps"]
+    result["predicted_funding_rate"] = result["predicted_funding_rate"] if "predicted_funding_rate" in result.columns else np.nan
+    if "open_interest" in result.columns:
+        result["oi_zscore"] = (result["open_interest"] - result["open_interest"].rolling(100, min_periods=20).mean()) / result["open_interest"].rolling(100, min_periods=20).std().replace(0, np.nan)
+        result["oi_acceleration"] = result["oi_change"].diff()
+        result["price_oi_interaction"] = result["return_1"] * result["oi_change"]
+    else:
+        result[["oi_zscore", "oi_acceleration", "price_oi_interaction"]] = np.nan
+    if {"bid_price", "ask_price", "bid_size", "ask_size"}.issubset(result.columns):
+        result["microprice"] = (result["ask_price"] * result["bid_size"] + result["bid_price"] * result["ask_size"]) / (result["bid_size"] + result["ask_size"]).replace(0, np.nan)
+        result["weighted_mid_bps"] = (result["microprice"] / result["close"] - 1.0) * 10_000.0
+        result["spread_change_bps"] = result["spread_bps"].diff()
+        result["order_book_imbalance_change"] = result["order_book_imbalance"].diff()
+    else:
+        result[["microprice", "weighted_mid_bps", "spread_change_bps", "order_book_imbalance_change"]] = np.nan
+    for depth in (5, 10):
+        bid, ask = f"bid_depth_{depth}", f"ask_depth_{depth}"
+        result[f"depth_imbalance_{depth}"] = (result[bid] - result[ask]) / (result[bid] + result[ask]).replace(0, np.nan) if {bid, ask}.issubset(result.columns) else np.nan
+    result["trade_imbalance_mean_10"] = result["trade_imbalance"].rolling(10, min_periods=5).mean()
+    result["trade_imbalance_acceleration"] = result["trade_imbalance"].diff()
+    result["cvd_rolling_change"] = result["cvd"].diff(10)
+    result["taker_buy_ratio"] = result["taker_buy_volume"] / volume.replace(0, np.nan) if "taker_buy_volume" in result.columns else np.nan
+    result["taker_sell_ratio"] = result["taker_sell_volume"] / volume.replace(0, np.nan) if "taker_sell_volume" in result.columns else np.nan
     return result.replace([np.inf, -np.inf], np.nan)

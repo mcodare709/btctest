@@ -88,6 +88,12 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(first["entry_time"], second["entry_time"])
         self.assertAlmostEqual(first["quantity"], second["quantity"])
 
+    def test_max_holding_bars_forces_time_exit(self) -> None:
+        config = BacktestConfig(max_holding_bars=3)
+        result = run_backtest(make_market_data(rows=80), config=config, timeframe="30s")
+        time_exits = result.trades[result.trades["exit_reason"] == "time_exit"]
+        self.assertGreater(len(time_exits), 0)
+        self.assertTrue((time_exits["bars_held"] == 3).all())
     def test_gap_beyond_liquidation_is_recorded(self) -> None:
         raw = make_market_data()
         raw.loc[35, ["open", "high", "low", "close"]] = [50.0, 51.0, 30.0, 50.0]

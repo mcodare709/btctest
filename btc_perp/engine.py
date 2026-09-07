@@ -245,6 +245,11 @@ def run_backtest(
                 close_position(position, stop_reference, row, timestamp, index, "stop_loss")
                 position = None
 
+        # Exit at the next bar open after exactly max_holding_bars elapsed bars.
+        # Stop loss and liquidation above retain priority over this time exit.
+        if position is not None and index - position.entry_index >= config.max_holding_bars:
+            close_position(position, open_price, row, timestamp, index, "time_exit")
+            position = None
         equity_before_liquidation = cash + _unrealized(position, close_price)
         margin = abs(position.quantity * close_price) * config.maintenance_margin_rate if position is not None else 0.0
         near_liquidation = near_liquidation or (position is not None and equity_before_liquidation <= margin * 1.25)

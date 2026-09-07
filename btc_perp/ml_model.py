@@ -17,7 +17,7 @@ import pandas as pd
 from .config import BacktestConfig
 from .data import validate_market_data
 from .features import build_features
-from .protocol import EXECUTION_PROTOCOL_VERSION, infer_timeframe, next_open_horizon_return
+from .protocol import EXECUTION_PROTOCOL_VERSION, infer_timeframe, net_horizon_returns
 
 
 MODEL_FEATURES = (
@@ -36,7 +36,23 @@ MODEL_FEATURES = (
     "liquidation_ratio",
     "long_short_log_ratio",
     "funding_rate",
-)
+    "latest_known_funding_rate", "funding_change", "funding_zscore",
+    "mark_index_basis_bps", "premium_index", "predicted_funding_rate",
+    "oi_zscore", "oi_acceleration", "price_oi_interaction",
+    "microprice", "weighted_mid_bps", "spread_change_bps", "order_book_imbalance_change",
+    "depth_imbalance_5", "depth_imbalance_10", "trade_imbalance_mean_10",
+    "trade_imbalance_acceleration", "cvd_rolling_change", "taker_buy_ratio", "taker_sell_ratio",
+    "has_orderbook", "has_open_interest", "has_liquidation", "has_long_short_ratio", "has_funding",)
+
+FEATURE_GROUPS = {
+    "price_momentum": ("return_1", "return_2", "return_10", "ema_gap_pct"),
+    "volatility": ("atr_pct", "realized_vol"),
+    "volume": ("volume_z",),
+    "order_flow": ("trade_imbalance", "cvd_change", "trade_imbalance_mean_10", "trade_imbalance_acceleration", "cvd_rolling_change", "taker_buy_ratio", "taker_sell_ratio"),
+    "order_book": ("order_book_imbalance", "spread_bps", "microprice", "weighted_mid_bps", "spread_change_bps", "order_book_imbalance_change", "depth_imbalance_5", "depth_imbalance_10"),
+    "derivatives": ("oi_change", "liquidation_ratio", "long_short_log_ratio", "funding_rate", "latest_known_funding_rate", "funding_change", "funding_zscore", "mark_index_basis_bps", "premium_index", "predicted_funding_rate", "oi_zscore", "oi_acceleration", "price_oi_interaction"),
+}
+FEATURE_SCHEMA_VERSION = "canonical-v2"
 WARMUP_FEATURES = (
     "return_1",
     "return_2",
@@ -84,17 +100,23 @@ def make_supervised_dataset(
     if horizon_bars <= 0:
         raise ValueError("horizon_bars must be positive")
     features = _feature_frame(market_data)
-    future_return = next_open_horizon_return(features, horizon_bars)
-    cost_band_bps = 2.0 * (fee_rate * 10_000.0 + slippage_bps) + default_spread_bps + min_edge_bps
-    cost_band = cost_band_bps / 10_000.0
-
-    valid = features[list(WARMUP_FEATURES)].notna().all(axis=1) & future_return.notna()
-    x = features.loc[valid, list(MODEL_FEATURES)].copy()
-    x["spread_bps"] = x["spread_bps"].fillna(default_spread_bps)
-    x = x.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
-    future = future_return.loc[valid]
+    net_returns = net_horizon_returns(
+        features,
+        horizon_bars,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+        default_spread_bps=default_spread_bps,
+    )
+    threshold = min_edge_bps / 10_000.0
+    valid = features[list(WARMUP_FEATURES)].notna().all(axis=1) & net_returns[["long_net_return", "short_net_return"]].notna().all(axis=1)
+    x = features.loc[valid, list(MODEL_FEATURES)].copy().replace([np.inf, -np.inf], np.nan).astype(float)
+    executable = net_returns.loc[valid]
     y = pd.Series(
-        np.select([future < -cost_band, future > cost_band], [0, 2], default=1),
+        np.select(
+            [executable["short_net_return"] > threshold, executable["long_net_return"] > threshold],
+            [0, 2],
+            default=1,
+        ),
         index=x.index,
         name="target",
         dtype="int64",
@@ -178,11 +200,15 @@ def train_catboost(
     iterations: int = 400,
     depth: int = 6,
     learning_rate: float = 0.05,
+    timeframe: str | None = None,
+    data_source: str = "unknown",
 ) -> dict[str, Any]:
     """Train a chronological CatBoost classifier and save a model artifact."""
 
     classifier = _catboost()
-    x, y = make_supervised_dataset(market_data, horizon_bars=horizon_bars)
+    validated_data = validate_market_data(market_data.reset_index() if isinstance(market_data.index, pd.DatetimeIndex) else market_data)
+    resolved_timeframe = timeframe or infer_timeframe(validated_data)
+    x, y = make_supervised_dataset(validated_data, horizon_bars=horizon_bars)
     if len(x) < 100 or y.nunique() < 3:
         raise ValueError("training data must contain at least 100 rows and all three target classes")
     split = int(len(x) * 0.8)
@@ -202,7 +228,10 @@ def train_catboost(
     model.save_model(str(path))
     metadata = {
         "execution_protocol": EXECUTION_PROTOCOL_VERSION,
+        "source_timeframe": resolved_timeframe,
         "timeframe": resolved_timeframe,
+        "horizon_seconds": horizon_bars * int(pd.Timedelta(resolved_timeframe).total_seconds()),
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "data_source": data_source,
         "train_start": x.index[0].isoformat(),
         "train_end": x.index[train_end - 1].isoformat(),
@@ -210,6 +239,7 @@ def train_catboost(
             "fee_rate": 0.0004,
             "slippage_bps": 1.0,
             "default_spread_bps": 2.0,
+            "cost_model": "next-open-v1",
             "min_edge_bps": 2.0,
         },
         "feature_names": list(MODEL_FEATURES),
@@ -218,6 +248,7 @@ def train_catboost(
         "train_rows": train_end,
         "purged_rows": split - train_end,
         "validation_rows": len(x) - split,
+        "catboost_parameters": {"iterations": iterations, "depth": depth, "learning_rate": learning_rate, "random_seed": 42},
     }
     path.with_suffix(".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return metadata
