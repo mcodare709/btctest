@@ -11,8 +11,10 @@ import pandas as pd
 from .config import BacktestConfig
 from .data import validate_market_data
 from .engine import run_backtest
-from .evaluation import WalkForwardFold, purged_walk_forward_splits
+from .evaluation import calibration_metrics, expected_return_calibration, WalkForwardFold, purged_walk_forward_splits
 from .metrics import calculate_metrics
+from .ml_model import _catboost, make_supervised_dataset
+from .protocol import next_open_horizon_return
 from .signals import cost_aware_baseline_signal
 
 
@@ -134,3 +136,60 @@ def run_parameter_sensitivity(
             "oos_report": report,
         }
     return results
+
+def run_catboost_purged_oos_evaluation(
+    market_data: pd.DataFrame,
+    *,
+    horizon_bars: int,
+    train_bars: int,
+    test_bars: int,
+    purge_bars: int,
+    iterations: int = 100,
+    depth: int = 6,
+    learning_rate: float = 0.05,
+) -> dict[str, Any]:
+    """Train one classifier per fold and report only future OOS predictions.
+
+    Each fitted model sees only a fold's training segment. The purge must be
+    at least the label horizon, so training labels cannot observe OOS prices.
+    """
+
+    if purge_bars < horizon_bars:
+        raise ValueError("purge_bars must be at least horizon_bars")
+    frame = market_data if isinstance(market_data.index, pd.DatetimeIndex) else validate_market_data(market_data)
+    folds = purged_walk_forward_splits(len(frame), train_bars=train_bars, test_bars=test_bars, purge_bars=purge_bars)
+    if not folds:
+        raise ValueError("not enough rows for one purged walk-forward fold")
+    all_x, all_y = make_supervised_dataset(frame, horizon_bars=horizon_bars)
+    all_returns = next_open_horizon_return(frame, horizon_bars)
+    classifier = _catboost()
+    reports: list[dict[str, Any]] = []
+    for number, fold in enumerate(folds):
+        train_frame = frame.iloc[fold.train_start:fold.train_end]
+        train_x, train_y = make_supervised_dataset(train_frame, horizon_bars=horizon_bars)
+        test_start = frame.index[fold.test_start]
+        test_end = frame.index[fold.test_end - 1]
+        test_x = all_x.loc[(all_x.index >= test_start) & (all_x.index <= test_end)]
+        test_y = all_y.loc[test_x.index]
+        if len(train_x) < 100 or train_y.nunique() < 3 or test_x.empty:
+            reports.append({"fold": number, "status": "skipped", "reason": "insufficient rows or target classes", "split": asdict(fold)})
+            continue
+        model = classifier(loss_function="MultiClass", iterations=iterations, depth=depth, learning_rate=learning_rate, random_seed=42, verbose=False, allow_writing_files=False)
+        model.fit(train_x, train_y, verbose=False)
+        probabilities = np.asarray(model.predict_proba(test_x), dtype=float)
+        class_ids = np.asarray(model.classes_, dtype=int)
+        probability_by_class = {label: probabilities[:, position] for position, label in enumerate(class_ids)}
+        up_probability = probability_by_class.get(2, np.zeros(len(test_x)))
+        realized_return = all_returns.loc[test_x.index].to_numpy(dtype=float)
+        class_mean_return = {label: float(all_returns.loc[train_x.index][train_y == label].mean()) for label in class_ids}
+        expected_return = sum(probability_by_class.get(label, 0.0) * class_mean_return[label] for label in class_ids)
+        reports.append({
+            "fold": number,
+            "status": "ok",
+            "split": asdict(fold),
+            "train_rows": len(train_x),
+            "oos_rows": len(test_x),
+            "probability_calibration": calibration_metrics(up_probability, (test_y.to_numpy() == 2).astype(float)),
+            "expected_return_calibration": expected_return_calibration(expected_return, realized_return),
+        })
+    return {"folds": reports, "fold_count": len(reports), "horizon_bars": horizon_bars, "purge_bars": purge_bars}
