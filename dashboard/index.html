@@ -177,7 +177,7 @@
             <div><div class="label">持倉</div><div class="data-value" id="position">空倉</div></div>
             <div><div class="label">名目倉位</div><div class="data-value" id="notional">0.00 USDT</div></div>
             <div><div class="label">模擬槓桿上限</div><div class="data-value" id="leverage">20x</div></div>
-            <div><div class="label">浮動毛 PnL</div><div class="data-value" id="unrealized">0.00 USDT</div></div>
+            <div><div class="label">浮動淨 PnL（含已知成本）</div><div class="data-value" id="unrealized">0.00 USDT</div></div>
             <div><div class="label">停損參考價</div><div class="data-value" id="stop">—</div></div>
             <div><div class="label">進場價格</div><div class="data-value" id="entry-price">—</div></div>
             <div><div class="label">開倉時間</div><div class="data-value" id="entry-time">—</div></div>
@@ -191,12 +191,12 @@
       <div class="pnl-grid">
         <div class="pnl-stat"><div class="label">總 PnL（權益 − 起始）</div><div class="value" id="total-pnl">0.00 USDT</div></div>
         <div class="pnl-stat"><div class="label">已平倉淨 PnL</div><div class="value" id="realized-pnl">0.00 USDT</div></div>
-        <div class="pnl-stat"><div class="label">浮動毛 PnL</div><div class="value" id="floating-pnl">0.00 USDT</div></div>
-        <div class="pnl-stat"><div class="label">已發生交易成本</div><div class="value" id="trading-cost">0.00 USDT</div></div>
+        <div class="pnl-stat"><div class="label">浮動淨 PnL（含已知成本）</div><div class="value" id="floating-pnl">0.00 USDT</div></div>
+        <div class="pnl-stat"><div class="label">手續費＋滑價（價差反映於成交價）</div><div class="value" id="trading-cost">0.00 USDT</div></div>
         <div class="pnl-stat"><div class="label">Funding 淨支出</div><div class="value" id="funding-cost">0.00 USDT</div></div>
         <div class="pnl-stat"><div class="label">已平倉筆數／勝率</div><div class="value" id="trade-stats">0 筆／—</div></div>
       </div>
-      <div class="pnl-breakdown" id="pnl-breakdown">損益橋接：已平倉淨 PnL + 浮動毛 PnL − 未平倉進場成本 − 未平倉 Funding</div>
+      <div class="pnl-breakdown" id="pnl-breakdown">損益橋接：已平倉淨 PnL + 浮動淨 PnL（含已知成本） − 未平倉進場成本 − 未平倉 Funding</div>
     </section>
 
     <section class="bottom">
@@ -678,7 +678,7 @@
         <td class="${signedClass(trade.net)}">${signedMoney(trade.net)}</td>
         <td>${reasonLabel(trade.reason)}</td>
       </tr>`).join("");
-      $("trade-table").innerHTML = `<table class="ledger"><thead><tr><th>#</th><th>開倉</th><th>平倉</th><th>方向</th><th>數量 BTC</th><th>進場價</th><th>出場價</th><th>進場名目</th><th>毛 PnL</th><th>交易成本<br><span class="muted">進場 / 出場</span></th><th>Funding 淨額</th><th>淨 PnL</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table>`;
+      $("trade-table").innerHTML = `<table class="ledger"><thead><tr><th>#</th><th>開倉</th><th>平倉</th><th>方向</th><th>數量 BTC</th><th>進場價</th><th>出場價</th><th>進場名目</th><th>毛 PnL</th><th>手續費＋滑價<br><span class="muted">價差已反映成交價</span></th><th>Funding 淨額</th><th>淨 PnL</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     function renderLogs() {

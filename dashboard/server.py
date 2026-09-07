@@ -55,6 +55,8 @@ HFT_MIN_EDGE_BPS = 2.0
 HFT_FEE_BPS = 4.0
 HFT_SLIPPAGE_BPS = 1.0
 HFT_MIN_MOVE_BPS = 10.0
+HFT_RISK_PER_TRADE = 0.02
+HFT_TAKE_PROFIT_PCT = 0.01
 HFT_ENGINE = None
 
 
@@ -561,7 +563,7 @@ class HFTPaperEngine:
         ask = self.ask or price
         entry = ask if side == 1 else bid
         cost_rate = 2 * 0.0004 + 2 * 0.0001 + max(0.0, spread_bps) / 10_000
-        notional = min((self.state["cash"] * 0.01) / max(stop_pct + cost_rate, 0.0001), self.state["cash"] * 20.0)
+        notional = min((self.state["cash"] * HFT_RISK_PER_TRADE) / max(stop_pct + cost_rate, 0.0001), self.state["cash"] * 20.0)
         if notional <= 0:
             return
         qty = notional / entry
@@ -576,6 +578,7 @@ class HFTPaperEngine:
             "funding": 0.0,
             "entrySpreadBps": spread_bps,
             "stop": entry * (1.0 - side * stop_pct),
+            "takeProfit": entry * (1.0 + side * HFT_TAKE_PROFIT_PCT),
             "opened": now_ms,
         }
         self._log(f"高頻開倉 {('做多' if side == 1 else '做空')} · 名目 {notional:.2f} USDT", now_ms)
@@ -587,10 +590,14 @@ class HFTPaperEngine:
             return
         liquidation = self._mark_equity(self.last_price) <= abs(position["qty"] * self.last_price) * 0.005
         stop_hit = self.last_price <= position["stop"] if position["side"] == 1 else self.last_price >= position["stop"]
+        take_profit_hit = self.last_price >= position.get("takeProfit", float("inf")) if position["side"] == 1 else self.last_price <= position.get("takeProfit", float("-inf"))
         if liquidation:
             self._close(self.last_price, "liquidation", now_ms)
         elif stop_hit:
             self._close(self.last_price, "stop", now_ms)
+        elif take_profit_hit:
+            self._close(self.last_price, "take profit", now_ms)
+
     def _decide(self, now_ms: int) -> None:
         if now_ms - self.last_decision_at < HFT_DECISION_MS or not self.last_price:
             return
@@ -632,6 +639,7 @@ class HFTPaperEngine:
 
         if position:
             stop_hit = self.last_price <= position["stop"] if position["side"] == 1 else self.last_price >= position["stop"]
+            take_profit_hit = self.last_price >= position.get("takeProfit", float("inf")) if position["side"] == 1 else self.last_price <= position.get("takeProfit", float("-inf"))
             liquidation = self._mark_equity(self.last_price) <= abs(position["qty"] * self.last_price) * 0.005
             held_ms = now_ms - position["opened"]
             timed_out = held_ms >= HFT_MAX_HOLD_MS
