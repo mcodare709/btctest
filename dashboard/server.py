@@ -469,8 +469,8 @@ class HFTPaperEngine:
         price = self.last_price
         if not price or len(self.prices) < 2:
             return 0.0, 0.0, 0.0, 5.0, 0.0
-        old = next((value for timestamp, value in self.prices if timestamp <= now_ms - 5_000), self.prices[0][1])
-        ret5 = price / old - 1.0 if old else 0.0
+        old = next((value for timestamp, value in reversed(self.prices) if timestamp <= now_ms - 5_000), None)
+        ret5 = price / old - 1.0 if old and now_ms - next(timestamp for timestamp, value in reversed(self.prices) if timestamp <= now_ms - 5_000) <= 7_500 else 0.0
         recent = [
             value
             for timestamp, value in self.prices
@@ -518,7 +518,7 @@ class HFTPaperEngine:
         ask = self.ask or price
         exit_price = bid if position["side"] == 1 else ask
         spread_bps = max(0.0, (ask - bid) / price * 10_000) if price else 0.0
-        exit_cost = position["qty"] * exit_price * (0.0004 + spread_bps / 20_000 + 0.0001)
+        exit_cost = position["qty"] * exit_price * (0.0004 + 0.0001)
         cash_before = self.state["cash"]
         gross = position["qty"] * (exit_price - position["entry"]) * position["side"]
         raw_cash = cash_before + gross - exit_cost
@@ -565,7 +565,7 @@ class HFTPaperEngine:
         if notional <= 0:
             return
         qty = notional / entry
-        entry_cost = qty * entry * (0.0004 + max(0.0, spread_bps) / 20_000 + 0.0001)
+        entry_cost = qty * entry * (0.0004 + 0.0001)
         self.state["cash"] -= entry_cost
         self.state["position"] = {
             "side": side,
@@ -580,6 +580,17 @@ class HFTPaperEngine:
         }
         self._log(f"高頻開倉 {('做多' if side == 1 else '做空')} · 名目 {notional:.2f} USDT", now_ms)
 
+    def _event_risk_check(self, now_ms: int) -> None:
+        """Check stop and liquidation on every market event, never on a timer."""
+        position = self.state.get("position")
+        if position is None or not self.last_price:
+            return
+        liquidation = self._mark_equity(self.last_price) <= abs(position["qty"] * self.last_price) * 0.005
+        stop_hit = self.last_price <= position["stop"] if position["side"] == 1 else self.last_price >= position["stop"]
+        if liquidation:
+            self._close(self.last_price, "liquidation", now_ms)
+        elif stop_hit:
+            self._close(self.last_price, "stop", now_ms)
     def _decide(self, now_ms: int) -> None:
         if now_ms - self.last_decision_at < HFT_DECISION_MS or not self.last_price:
             return
@@ -670,6 +681,7 @@ class HFTPaperEngine:
             self.funding_rate = float(data.get("r", self.funding_rate))
             self.next_funding_at = int(data.get("T") or self.next_funding_at or 0)
             self.state["nextFundingAt"] = self.next_funding_at
+        self._event_risk_check(event_time)
         self._decide(event_time)
 
     def _poll_funding(self) -> None:

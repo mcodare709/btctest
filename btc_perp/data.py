@@ -98,9 +98,12 @@ def resample_market_data(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     for column in ("open", "high", "low", "close", "volume"):
         if column in frame:
             agg[column] = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}[column]
-    for column in ("open_interest", "bid_price", "ask_price", "bid_size", "ask_size", "long_short_ratio"):
+    for column in ("open_interest", "long_short_ratio"):
         if column in frame:
             agg[column] = "last"
+    for column in ("bid_price", "ask_price", "bid_size", "ask_size"):
+        if column in frame:
+            agg[column] = "first"
     for column in ("funding_rate",):
         if column in frame:
             agg[column] = "last"

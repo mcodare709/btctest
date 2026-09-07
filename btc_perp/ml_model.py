@@ -137,7 +137,7 @@ class CatBoostBundle:
         raw_direction = 0
         if probability_up >= config.long_probability_threshold and probability_up > probability_down:
             raw_direction = 1
-        elif probability_up <= config.short_probability_threshold and probability_down > probability_up:
+        elif probability_down >= (1.0 - config.short_probability_threshold) and probability_down > probability_up:
             raw_direction = -1
         if raw_direction == 0 or not config.cost_aware_filter:
             return probability_up, raw_direction

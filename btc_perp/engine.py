@@ -200,11 +200,6 @@ def run_backtest(
             cash -= funding_payment
             position.funding_cost += funding_payment
 
-        # Time-based exit is known before this bar's open.
-        if position is not None and index - position.entry_index >= config.max_holding_bars:
-            close_position(position, open_price, row, timestamp, index, "time_exit")
-            position = None
-
         liquidated_this_bar = False
         near_liquidation = False
         if position is not None:
