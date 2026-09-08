@@ -37,7 +37,7 @@ def build_archive_dataset(archive_root: str | Path, output_dir: str | Path) -> d
     if not kline_files:
         raise FileNotFoundError(f"no Kline ZIPs in {root}")
     bars = pd.concat([pd.read_csv(file, header=None, names=KLINE_COLUMNS, compression="zip") for file in kline_files], ignore_index=True)
-    bars = bars[["timestamp", "open", "high", "low", "close", "volume", "taker_buy_volume"]]
+    bars = bars[["timestamp", "open", "high", "low", "close", "volume", "quote_volume", "trade_count", "taker_buy_volume", "taker_buy_quote"]]
     bars["timestamp"] = pd.to_numeric(bars["timestamp"], errors="coerce")
     bars = bars.dropna(subset=["timestamp"])
     bars["timestamp"] = pd.to_datetime(bars["timestamp"], unit="ms", utc=True)

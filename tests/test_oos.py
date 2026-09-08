@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from btc_perp.config import BacktestConfig
-from btc_perp.oos import run_parameter_sensitivity, run_purged_oos_backtest
+from btc_perp.oos import realized_class_net_return, run_parameter_sensitivity, run_purged_oos_backtest
 from tests.test_backtest import make_market_data
 
 
@@ -17,7 +19,15 @@ class OOSBacktestTests(unittest.TestCase):
         for fold in report["folds"]:
             self.assertIn("summary", fold)
             self.assertIn("buy_and_hold", fold["benchmarks"])
+            self.assertIn("trading_cost", fold["benchmarks"]["buy_and_hold"])
             self.assertEqual(fold["split"]["purge_end"], fold["split"]["test_start"])
+    def test_flat_class_maps_to_zero_realized_return(self) -> None:
+        returns = realized_class_net_return(
+            np.array([0, 1, 2]),
+            np.array([0.02, 0.03, 0.04]),
+            np.array([-0.02, -0.03, -0.04]),
+        )
+        np.testing.assert_allclose(returns, np.array([-0.02, 0.0, 0.04]))
     def test_sensitivity_uses_oos_reports_for_every_variant(self) -> None:
         frame = make_market_data(rows=180)
         result = run_parameter_sensitivity(

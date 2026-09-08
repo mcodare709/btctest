@@ -45,6 +45,13 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     volume_mean = volume.rolling(30, min_periods=30).mean()
     volume_std = volume.rolling(30, min_periods=30).std()
     result["volume_z"] = (volume - volume_mean) / volume_std.replace(0, np.nan)
+    quote_volume = pd.to_numeric(result["quote_volume"], errors="coerce") if "quote_volume" in result else pd.Series(np.nan, index=result.index)
+    trade_count = pd.to_numeric(result["trade_count"], errors="coerce") if "trade_count" in result else pd.Series(np.nan, index=result.index)
+    taker_buy_quote = pd.to_numeric(result["taker_buy_quote"], errors="coerce") if "taker_buy_quote" in result else pd.Series(np.nan, index=result.index)
+    result["quote_volume_z"] = (quote_volume - quote_volume.rolling(30, min_periods=30).mean()) / quote_volume.rolling(30, min_periods=30).std().replace(0, np.nan)
+    result["trade_count_z"] = (trade_count - trade_count.rolling(30, min_periods=30).mean()) / trade_count.rolling(30, min_periods=30).std().replace(0, np.nan)
+    result["average_trade_size_quote"] = quote_volume / trade_count.replace(0, np.nan)
+    result["taker_buy_quote_ratio"] = taker_buy_quote / quote_volume.replace(0, np.nan)
 
     if {"bid_size", "ask_size"}.issubset(result.columns):
         denominator = (result["bid_size"] + result["ask_size"]).replace(0, np.nan)

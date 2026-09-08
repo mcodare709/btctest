@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -28,8 +28,12 @@ MODEL_FEATURES = (
     "atr_pct",
     "realized_vol",
     "volume_z",
+    "quote_volume_z",
+    "trade_count_z",
+    "average_trade_size_quote",
     "order_book_imbalance",
     "trade_imbalance",
+    "taker_buy_quote_ratio",
     "cvd_change",
     "spread_bps",
     "oi_change",
@@ -47,8 +51,8 @@ MODEL_FEATURES = (
 FEATURE_GROUPS = {
     "price_momentum": ("return_1", "return_2", "return_10", "ema_gap_pct"),
     "volatility": ("atr_pct", "realized_vol"),
-    "volume": ("volume_z",),
-    "order_flow": ("trade_imbalance", "cvd_change", "trade_imbalance_mean_10", "trade_imbalance_acceleration", "cvd_rolling_change", "taker_buy_ratio", "taker_sell_ratio"),
+    "volume": ("volume_z", "quote_volume_z", "trade_count_z", "average_trade_size_quote"),
+    "order_flow": ("trade_imbalance", "taker_buy_quote_ratio", "cvd_change", "trade_imbalance_mean_10", "trade_imbalance_acceleration", "cvd_rolling_change", "taker_buy_ratio", "taker_sell_ratio"),
     "order_book": ("order_book_imbalance", "spread_bps", "microprice", "weighted_mid_bps", "spread_change_bps", "order_book_imbalance_change", "depth_imbalance_5", "depth_imbalance_10"),
     "derivatives": ("oi_change", "liquidation_ratio", "long_short_log_ratio", "funding_rate", "latest_known_funding_rate", "funding_change", "funding_zscore", "mark_index_basis_bps", "premium_index", "predicted_funding_rate", "oi_zscore", "oi_acceleration", "price_oi_interaction"),
 }
@@ -63,6 +67,35 @@ WARMUP_FEATURES = (
     "volume_z",
 )
 
+
+def select_feature_manifest(
+    features: pd.DataFrame,
+    *,
+    min_coverage: float = 0.95,
+) -> dict[str, Any]:
+    """Select non-constant candidate features actually supported by this dataset."""
+
+    if not 0.0 < min_coverage <= 1.0:
+        raise ValueError("min_coverage must be in (0, 1]")
+    coverage: dict[str, float] = {}
+    selected: list[str] = []
+    for name in MODEL_FEATURES:
+        if name not in features:
+            coverage[name] = 0.0
+            continue
+        values = pd.to_numeric(features[name], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        ratio = float(values.notna().mean())
+        coverage[name] = ratio
+        if ratio >= min_coverage and values.dropna().nunique() > 1:
+            selected.append(name)
+    if not selected:
+        raise ValueError("no non-constant model features meet the coverage threshold")
+    return {
+        "schema_version": FEATURE_SCHEMA_VERSION,
+        "min_coverage": min_coverage,
+        "features": selected,
+        "coverage": coverage,
+    }
 
 def _catboost() -> Any:
     try:
@@ -89,6 +122,8 @@ def make_supervised_dataset(
     slippage_bps: float = 1.0,
     default_spread_bps: float = 2.0,
     min_edge_bps: float = 2.0,
+    feature_names: Sequence[str] | None = None,
+    min_feature_coverage: float = 0.95,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Build leakage-safe features and ``down/flat/up`` labels.
 
@@ -109,7 +144,13 @@ def make_supervised_dataset(
     )
     threshold = min_edge_bps / 10_000.0
     valid = features[list(WARMUP_FEATURES)].notna().all(axis=1) & net_returns[["long_net_return", "short_net_return"]].notna().all(axis=1)
-    x = features.loc[valid, list(MODEL_FEATURES)].copy().replace([np.inf, -np.inf], np.nan).astype(float)
+    resolved_features = tuple(feature_names) if feature_names is not None else tuple(
+        select_feature_manifest(features.loc[valid], min_coverage=min_feature_coverage)["features"]
+    )
+    unsupported = sorted(set(resolved_features).difference(features.columns))
+    if unsupported:
+        raise ValueError(f"feature manifest contains columns absent from dataset: {unsupported}")
+    x = features.loc[valid, list(resolved_features)].copy().replace([np.inf, -np.inf], np.nan).astype(float)
     executable = net_returns.loc[valid]
     y = pd.Series(
         np.select(
@@ -145,9 +186,9 @@ class CatBoostBundle:
         if not metadata_path.exists():
             raise ValueError("model metadata is required for timeframe and horizon validation")
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        feature_names = tuple(metadata.get("feature_names", MODEL_FEATURES))
-        if tuple(feature_names) != MODEL_FEATURES:
-            raise ValueError("model feature schema does not match current feature engineering")
+        feature_names = tuple(metadata.get("feature_names", ()))
+        if not feature_names or len(set(feature_names)) != len(feature_names) or not set(feature_names).issubset(MODEL_FEATURES):
+            raise ValueError("model feature manifest is not compatible with current feature engineering")
         if metadata.get("execution_protocol") != EXECUTION_PROTOCOL_VERSION:
             raise ValueError("model execution protocol does not match current backtest semantics")
         if expected_timeframe is not None and metadata.get("timeframe") != expected_timeframe:
@@ -157,8 +198,8 @@ class CatBoostBundle:
         return cls(model=model, feature_names=feature_names, metadata=metadata)
 
     def _row_frame(self, row: pd.Series) -> pd.DataFrame:
-        values = {name: row.get(name, 0.0) for name in self.feature_names}
-        frame = pd.DataFrame([values]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        values = {name: row.get(name, np.nan) for name in self.feature_names}
+        frame = pd.DataFrame([values]).replace([np.inf, -np.inf], np.nan)
         return frame.astype(float)
 
     def predict_probabilities(self, row: pd.Series) -> dict[int, float]:
@@ -205,9 +246,12 @@ def train_catboost(
 ) -> dict[str, Any]:
     """Train a chronological CatBoost classifier and save a model artifact."""
 
-    classifier = _catboost()
     validated_data = validate_market_data(market_data.reset_index() if isinstance(market_data.index, pd.DatetimeIndex) else market_data)
-    resolved_timeframe = timeframe or infer_timeframe(validated_data)
+    inferred_timeframe = infer_timeframe(validated_data)
+    if timeframe is not None and timeframe != inferred_timeframe:
+        raise ValueError(f"requested timeframe {timeframe!r} does not match input frequency {inferred_timeframe!r}")
+    resolved_timeframe = inferred_timeframe
+    classifier = _catboost()
     x, y = make_supervised_dataset(validated_data, horizon_bars=horizon_bars)
     if len(x) < 100 or y.nunique() < 3:
         raise ValueError("training data must contain at least 100 rows and all three target classes")
@@ -242,7 +286,8 @@ def train_catboost(
             "cost_model": "next-open-v1",
             "min_edge_bps": 2.0,
         },
-        "feature_names": list(MODEL_FEATURES),
+        "feature_names": list(x.columns),
+        "feature_manifest": select_feature_manifest(_feature_frame(validated_data)),
         "horizon_bars": horizon_bars,
         "target_classes": {"0": "down", "1": "flat", "2": "up"},
         "train_rows": train_end,

@@ -11,7 +11,7 @@ import pandas as pd
 
 from btc_perp.config import BacktestConfig
 from btc_perp.features import build_features
-from btc_perp.ml_model import EXECUTION_PROTOCOL_VERSION, MODEL_FEATURES, CatBoostBundle, make_supervised_dataset
+from btc_perp.ml_model import EXECUTION_PROTOCOL_VERSION, MODEL_FEATURES, CatBoostBundle, make_supervised_dataset, select_feature_manifest, train_catboost
 from btc_perp.signals import cost_aware_baseline_signal
 
 
@@ -56,12 +56,32 @@ class MLModelTests(unittest.TestCase):
 
     def test_supervised_labels_are_forward_only_and_cost_banded(self) -> None:
         x, y = make_supervised_dataset(make_market_data(), horizon_bars=10)
-        self.assertEqual(tuple(x.columns), MODEL_FEATURES)
+        self.assertTrue(set(x.columns).issubset(MODEL_FEATURES))
+        self.assertNotIn("funding_rate", x.columns)
         self.assertEqual(len(x), len(y))
         self.assertGreaterEqual(len(x), 100)
         self.assertTrue(set(y.unique()).issubset({0, 1, 2}))
         self.assertLess(x.index.max(), make_market_data().set_index("timestamp").index.max())
 
+    def test_manifest_excludes_missing_and_constant_features(self) -> None:
+        features = build_features(make_market_data())
+        manifest = select_feature_manifest(features)
+        self.assertIn("return_1", manifest["features"])
+        self.assertNotIn("funding_rate", manifest["features"])
+        self.assertNotIn("has_orderbook", manifest["features"])
+
+    def test_inference_keeps_missing_values_as_nan(self) -> None:
+        class FakeModel:
+            classes_ = np.array([0, 1, 2])
+
+            def predict_proba(self, frame: pd.DataFrame) -> np.ndarray:
+                self.frame = frame
+                return np.array([[0.2, 0.6, 0.2]])
+
+        model = FakeModel()
+        bundle = CatBoostBundle(model=model, feature_names=("return_1", "funding_rate"))
+        bundle.predict_probabilities(pd.Series({"return_1": 0.01, "funding_rate": np.nan}))
+        self.assertTrue(pd.isna(model.frame.loc[0, "funding_rate"]))
     def test_cost_aware_baseline_rejects_low_edge(self) -> None:
         row = pd.Series(
             {
@@ -81,6 +101,10 @@ class MLModelTests(unittest.TestCase):
         self.assertEqual(direction, 0)
         self.assertLessEqual(edge_bps, 0.0)
 
+    def test_train_rejects_declared_frequency_mismatch_before_model_load(self) -> None:
+        one_minute = make_market_data().iloc[::2].reset_index(drop=True)
+        with self.assertRaisesRegex(ValueError, "does not match input frequency"):
+            train_catboost(one_minute, "unused.cbm", timeframe="30s")
     def test_model_load_rejects_timeframe_mismatch(self) -> None:
         class FakeClassifier:
             def load_model(self, path: str) -> None:

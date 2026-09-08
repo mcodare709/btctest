@@ -12,6 +12,7 @@ from .config import BacktestConfig
 from .data import resample_market_data, validate_market_data
 from .features import build_features
 from .metrics import calculate_metrics
+from .protocol import scheduled_exit_index
 from .risk import size_position
 from .signals import cost_aware_baseline_signal
 
@@ -87,6 +88,34 @@ def _execution_costs(
     fee = quantity * fill_price * config.fee_rate
     return fill_price, fee, slippage_cost, spread_cost, fee + slippage_cost + spread_cost
 
+
+def _mark_price(row: pd.Series, fallback: float, field: str = "mark_price") -> float:
+    """Use an explicitly timestamp-aligned Mark Price, otherwise a contract-price fallback."""
+
+    return _numeric(row, field, fallback)
+
+
+def _is_liquidated(cash: float, position: _Position, reference_price: float, config: BacktestConfig) -> bool:
+    equity = cash + _unrealized(position, reference_price)
+    margin = abs(position.quantity * reference_price) * config.maintenance_margin_rate
+    return equity <= margin or equity <= 0.0
+
+
+def _liquidation_price(cash: float, position: _Position, config: BacktestConfig) -> float:
+    """Solve the isolated-margin threshold using the current cash balance."""
+
+    quantity = position.quantity
+    if position.side == 1:
+        denominator = quantity * (1.0 - config.maintenance_margin_rate)
+        return (quantity * position.entry_ref_price - cash) / denominator
+    denominator = quantity * (1.0 + config.maintenance_margin_rate)
+    return (cash + quantity * position.entry_ref_price) / denominator
+
+
+def _liquidation_precedes_stop(position: _Position, liquidation_price: float) -> bool:
+    """Choose the first adverse threshold crossed from the bar open."""
+
+    return liquidation_price >= position.stop_price if position.side == 1 else liquidation_price <= position.stop_price
 
 def _unrealized(position: _Position | None, close_price: float) -> float:
     if position is None:
@@ -203,14 +232,19 @@ def run_backtest(
         liquidated_this_bar = False
         near_liquidation = False
         if position is not None:
-            open_equity = cash + _unrealized(position, open_price)
-            open_margin = abs(position.quantity * open_price) * config.maintenance_margin_rate
-            if open_equity <= open_margin or open_equity <= 0:
-                close_position(position, open_price, row, timestamp, index, "liquidation")
+            open_mark = _mark_price(row, open_price, "mark_price_open")
+            if _is_liquidated(cash, position, open_mark, config):
+                close_position(position, open_mark, row, timestamp, index, "liquidation")
                 position = None
                 pending = None
                 liquidated_this_bar = True
                 near_liquidation = True
+
+        # A fixed-horizon exit is scheduled at this bar's open. It must happen
+        # before this bar's high/low path is evaluated.
+        if position is not None and index >= scheduled_exit_index(position.entry_index, config.max_holding_bars):
+            close_position(position, open_price, row, timestamp, index, "time_exit")
+            position = None
 
         # Execute the signal generated on the previous close at this open.
         if pending is not None and not liquidated_this_bar:
@@ -223,38 +257,36 @@ def run_backtest(
                 position = open_position(target, open_price, row, timestamp, index, stop_distance_pct)
             pending = None
 
-        # Intrabar liquidation is checked at the adverse extreme before stop.
-        # OHLC cannot reveal the exact path, so liquidation wins ties.
+        # OHLC cannot reveal path order. When both thresholds are crossed, use
+        # the threshold encountered first from the open; Mark Price extrema are
+        # used when supplied, otherwise the contract-price extreme is explicit.
         if position is not None:
-            adverse_price = _numeric(row, "low") if position.side == 1 else _numeric(row, "high")
-            adverse_equity = cash + _unrealized(position, adverse_price)
-            adverse_margin = abs(position.quantity * adverse_price) * config.maintenance_margin_rate
-            liquidation_hit = adverse_equity <= adverse_margin or adverse_equity <= 0
-            stop_hit = (position.side == 1 and _numeric(row, "low") <= position.stop_price) or (
-                position.side == -1 and _numeric(row, "high") >= position.stop_price
+            adverse_contract = _numeric(row, "low") if position.side == 1 else _numeric(row, "high")
+            mark_field = "mark_price_low" if position.side == 1 else "mark_price_high"
+            adverse_mark = _mark_price(row, adverse_contract, mark_field)
+            liquidation_price = _liquidation_price(cash, position, config)
+            liquidation_hit = _is_liquidated(cash, position, adverse_mark, config)
+            stop_hit = (position.side == 1 and adverse_contract <= position.stop_price) or (
+                position.side == -1 and adverse_contract >= position.stop_price
             )
-            if liquidation_hit:
-                close_position(position, adverse_price, row, timestamp, index, "liquidation")
+            if liquidation_hit and (not stop_hit or _liquidation_precedes_stop(position, liquidation_price)):
+                close_position(position, adverse_mark, row, timestamp, index, "liquidation")
                 position = None
                 near_liquidation = True
             elif stop_hit:
-                if position.side == 1:
-                    stop_reference = min(open_price, position.stop_price)
-                else:
-                    stop_reference = max(open_price, position.stop_price)
+                stop_reference = min(open_price, position.stop_price) if position.side == 1 else max(open_price, position.stop_price)
                 close_position(position, stop_reference, row, timestamp, index, "stop_loss")
                 position = None
-
-        # Exit at the next bar open after exactly max_holding_bars elapsed bars.
-        # Stop loss and liquidation above retain priority over this time exit.
-        if position is not None and index - position.entry_index >= config.max_holding_bars:
-            close_position(position, open_price, row, timestamp, index, "time_exit")
-            position = None
-        equity_before_liquidation = cash + _unrealized(position, close_price)
-        margin = abs(position.quantity * close_price) * config.maintenance_margin_rate if position is not None else 0.0
+            elif liquidation_hit:
+                close_position(position, adverse_mark, row, timestamp, index, "liquidation")
+                position = None
+                near_liquidation = True
+        close_mark = _mark_price(row, close_price)
+        equity_before_liquidation = cash + _unrealized(position, close_mark)
+        margin = abs(position.quantity * close_mark) * config.maintenance_margin_rate if position is not None else 0.0
         near_liquidation = near_liquidation or (position is not None and equity_before_liquidation <= margin * 1.25)
-        if position is not None and (equity_before_liquidation <= margin or equity_before_liquidation <= 0):
-            close_position(position, close_price, row, timestamp, index, "liquidation")
+        if position is not None and _is_liquidated(cash, position, close_mark, config):
+            close_position(position, close_mark, row, timestamp, index, "liquidation")
             position = None
             equity_before_liquidation = cash
             near_liquidation = True

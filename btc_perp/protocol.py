@@ -14,6 +14,16 @@ import pandas as pd
 EXECUTION_PROTOCOL_VERSION = "next-open-v1"
 
 
+def scheduled_exit_index(entry_index: int, horizon_bars: int) -> int:
+    """Return the bar index whose open executes a fixed-horizon time exit."""
+
+    if entry_index < 0:
+        raise ValueError("entry_index must be non-negative")
+    if horizon_bars <= 0:
+        raise ValueError("horizon_bars must be positive")
+    return entry_index + horizon_bars
+
+
 def next_open_horizon_return(frame: pd.DataFrame, horizon_bars: int) -> pd.Series:
     """Return the executable gross return for a close-time signal.
 

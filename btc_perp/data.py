@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .protocol import infer_timeframe
+
 REQUIRED_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
 OPTIONAL_COLUMNS = (
     "funding_rate",
@@ -87,38 +89,44 @@ def load_market_csv(path: str | Path) -> pd.DataFrame:
 
 
 def resample_market_data(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """Aggregate validated data without forward-filling event-only fields."""
+    """Downsample regular bars only, with left-closed/start-labeled buckets.
+
+    Upsampling invents price paths and is prohibited. A 1m source can produce
+    5m bars, but never a synthetic 30s experiment.
+    """
 
     if not isinstance(frame.index, pd.DatetimeIndex):
         frame = validate_market_data(frame.reset_index())
     if not timeframe:
         return frame.copy()
+    source_timeframe = infer_timeframe(frame)
+    source_seconds = int(pd.Timedelta(source_timeframe).total_seconds())
+    target_seconds = int(pd.Timedelta(timeframe).total_seconds())
+    if target_seconds < source_seconds:
+        raise ValueError(f"upsampling from {source_timeframe} to {timeframe} is prohibited")
+    if target_seconds == source_seconds:
+        return frame.copy()
+    if target_seconds % source_seconds:
+        raise ValueError(f"target timeframe {timeframe!r} must be an integer multiple of {source_timeframe!r}")
 
-    agg: dict[str, str] = {}
-    for column in ("open", "high", "low", "close", "volume"):
-        if column in frame:
-            agg[column] = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}[column]
-    for column in ("open_interest", "long_short_ratio"):
-        if column in frame:
-            agg[column] = "last"
-    for column in ("bid_price", "ask_price", "bid_size", "ask_size"):
-        if column in frame:
-            agg[column] = "first"
-    for column in ("funding_rate",):
-        if column in frame:
-            agg[column] = "last"
-    if "funding_event" in frame:
-        agg["funding_event"] = "max"
-    for column in ("taker_buy_volume", "taker_sell_volume", "liquidation_volume"):
+    agg: dict[str, str] = {
+        "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum",
+    }
+    for column in ("quote_volume", "trade_count", "taker_buy_volume", "taker_sell_volume", "taker_buy_quote", "taker_sell_quote", "liquidation_volume"):
         if column in frame:
             agg[column] = "sum"
+    for column in ("open_interest", "long_short_ratio", "bid_price", "ask_price", "bid_size", "ask_size", "mark_price", "index_price", "premium_index"):
+        if column in frame:
+            agg[column] = "last"
+    if "funding_rate" in frame:
+        agg["funding_rate"] = "last"
+    if "funding_event" in frame:
+        agg["funding_event"] = "max"
 
-    result = frame.resample(timeframe, label="right", closed="right").agg(agg).dropna(subset=["open", "high", "low", "close"])
-    result = result[result["volume"].fillna(0) >= 0]
+    result = frame.resample(timeframe, label="left", closed="left").agg(agg).dropna(subset=["open", "high", "low", "close"])
     if result.empty:
         raise ValueError(f"resampling to {timeframe!r} produced no rows")
     return result
-
 
 def available_columns(frame: pd.DataFrame) -> list[str]:
     """Return optional data columns that are actually present."""

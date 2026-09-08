@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import BacktestConfig, DEFAULT_EXPERIMENTS
 from .data import load_market_csv, resample_market_data
+from .protocol import infer_timeframe
 from .engine import run_backtest
 from .ml_model import CatBoostBundle, train_catboost
 from .oos import run_catboost_purged_oos_evaluation, run_purged_oos_backtest
@@ -30,8 +31,8 @@ def main() -> None:
 
     backtest = subparsers.add_parser("backtest")
     backtest.add_argument("--data", required=True, type=Path)
-    backtest.add_argument("--timeframe", default="30s")
-    backtest.add_argument("--horizon-bars", type=int, default=10)
+    backtest.add_argument("--timeframe", help="required with --model; otherwise preserves input frequency")
+    backtest.add_argument("--horizon-bars", type=int, help="required with --model; defaults to 10 without a model")
     backtest.add_argument("--output-dir", required=True, type=Path)
     backtest.add_argument("--model", type=Path, help="optional trained CatBoost .cbm artifact")
 
@@ -42,7 +43,7 @@ def main() -> None:
     oos = subparsers.add_parser("evaluate-oos")
     oos.add_argument("--data", required=True, type=Path)
     oos.add_argument("--output-dir", required=True, type=Path)
-    oos.add_argument("--timeframe", default="30s")
+    oos.add_argument("--timeframe", help="optional downsample target")
     oos.add_argument("--train-bars", required=True, type=int)
     oos.add_argument("--test-bars", required=True, type=int)
     oos.add_argument("--purge-bars", required=True, type=int)
@@ -52,7 +53,7 @@ def main() -> None:
     model_oos = subparsers.add_parser("evaluate-oos-model")
     model_oos.add_argument("--data", required=True, type=Path)
     model_oos.add_argument("--output-dir", required=True, type=Path)
-    model_oos.add_argument("--timeframe", default="30s")
+    model_oos.add_argument("--timeframe", help="optional downsample target")
     model_oos.add_argument("--train-bars", required=True, type=int)
     model_oos.add_argument("--test-bars", required=True, type=int)
     model_oos.add_argument("--purge-bars", required=True, type=int)
@@ -61,7 +62,7 @@ def main() -> None:
     train = subparsers.add_parser("train-model")
     train.add_argument("--data", required=True, type=Path)
     train.add_argument("--horizon-bars", type=int, default=10)
-    train.add_argument("--timeframe", default="30s")
+    train.add_argument("--timeframe", help="optional assertion; must equal the actual input frequency")
     train.add_argument("--data-source", default="unknown")
     train.add_argument("--output", required=True, type=Path)
 
@@ -73,8 +74,15 @@ def main() -> None:
         return
 
     if args.command == "backtest":
-        config = BacktestConfig(max_holding_bars=args.horizon_bars)
-        bundle = CatBoostBundle.load(args.model) if args.model else None
+        horizon_bars = args.horizon_bars or 10
+        config = BacktestConfig(max_holding_bars=horizon_bars)
+        if args.model and (args.timeframe is None or args.horizon_bars is None):
+            raise ValueError("backtest --model requires --timeframe and --horizon-bars")
+        bundle = CatBoostBundle.load(
+            args.model,
+            expected_timeframe=args.timeframe,
+            expected_horizon_bars=horizon_bars,
+        ) if args.model else None
         result = run_backtest(
             market_data,
             config=config,
@@ -85,7 +93,7 @@ def main() -> None:
         return
 
     if args.command == "evaluate-oos-model":
-        evaluation_data = resample_market_data(market_data, args.timeframe)
+        evaluation_data = resample_market_data(market_data, args.timeframe) if args.timeframe else market_data
         report = run_catboost_purged_oos_evaluation(
             evaluation_data,
             horizon_bars=args.horizon_bars,
@@ -101,7 +109,7 @@ def main() -> None:
         return
     if args.command == "evaluate-oos":
         config = BacktestConfig(max_holding_bars=args.horizon_bars)
-        evaluation_data = resample_market_data(market_data, args.timeframe)
+        evaluation_data = resample_market_data(market_data, args.timeframe) if args.timeframe else market_data
         report = run_purged_oos_backtest(
             evaluation_data,
             config=config,

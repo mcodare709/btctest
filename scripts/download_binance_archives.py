@@ -22,9 +22,14 @@ def download(kind: str, interval: str, target: Path, start: date, end: date) -> 
     target.mkdir(parents=True, exist_ok=True)
     saved = []
     for month in months(start, end):
-        name = f"BTCUSDT-{interval}-{month}.zip"
-        url = f"{BASE}/{kind}/BTCUSDT/{interval}/{name}"
-        output = target / kind / interval / name
+        if kind in {"aggTrades", "trades"}:
+            name = f"BTCUSDT-{kind}-{month}.zip"
+            url = f"{BASE}/{kind}/BTCUSDT/{name}"
+            output = target / kind / name
+        else:
+            name = f"BTCUSDT-{interval}-{month}.zip"
+            url = f"{BASE}/{kind}/BTCUSDT/{interval}/{name}"
+            output = target / kind / interval / name
         if output.exists():
             saved.append(output)
             continue

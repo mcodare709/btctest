@@ -20,6 +20,44 @@ from .protocol import net_horizon_returns
 from .signals import cost_aware_baseline_signal
 
 
+def engine_cost_aware_benchmarks(
+    frame: pd.DataFrame,
+    *,
+    config: BacktestConfig,
+    oos_start: pd.Timestamp,
+    seed: int,
+) -> dict[str, dict[str, float | int | bool | None]]:
+    """Replay deterministic comparison rules through the same cost-aware engine."""
+
+    benchmark_config = replace(config, max_holding_bars=max(len(frame) + 1, config.max_holding_bars), cost_aware_filter=False)
+    rng = np.random.default_rng(seed)
+    random_directions = pd.Series(rng.choice(np.array([-1, 1]), size=len(frame)), index=frame.index)
+
+    def buy_and_hold(_: pd.Series, __: BacktestConfig) -> tuple[float, int]:
+        return 1.0, 1
+
+    def random_sign(row: pd.Series, _: BacktestConfig) -> tuple[float, int]:
+        return 0.5, int(random_directions.loc[row.name])
+
+    def momentum(row: pd.Series, _: BacktestConfig) -> tuple[float, int]:
+        value = row.get("return_1", np.nan)
+        return 0.5, 1 if value > 0 else -1 if value < 0 else 0
+
+    reports: dict[str, dict[str, float | int | bool | None]] = {}
+    for name, signal in {"buy_and_hold": buy_and_hold, "random_sign": random_sign, "simple_momentum": momentum}.items():
+        result = run_backtest(frame, config=benchmark_config, signal_fn=signal)
+        equity = result.equity_curve.loc[result.equity_curve.index >= oos_start]
+        trades = result.trades.loc[result.trades["entry_time"] >= oos_start] if not result.trades.empty else result.trades
+        reports[name] = calculate_metrics(equity, trades, config.initial_equity, config.annualization_days)
+    return reports
+
+
+def realized_class_net_return(labels: np.ndarray, long_net: np.ndarray, short_net: np.ndarray) -> np.ndarray:
+    """Map class targets to executable returns; Flat is explicitly no-trade."""
+
+    labels = np.asarray(labels, dtype=int)
+    return np.select([labels == 0, labels == 2], [short_net, long_net], default=0.0)
+
 def benchmark_returns(frame: pd.DataFrame, seed: int = 42) -> dict[str, float]:
     """Return OOS asset, random-sign, and one-bar momentum benchmark returns.
 
@@ -92,7 +130,7 @@ def _run_fold(
         "oos_start": oos_start.isoformat(),
         "oos_end": market_data.index[fold.test_end - 1].isoformat(),
         "summary": summary,
-        "benchmarks": benchmark_returns(market_data.iloc[fold.test_start : fold.test_end], seed=42 + fold_index),
+        "benchmarks": engine_cost_aware_benchmarks(frame, config=config, oos_start=oos_start, seed=42 + fold_index),
     }
 
 def run_parameter_sensitivity(
@@ -193,7 +231,7 @@ def run_catboost_purged_oos_evaluation(
     calibrator = PriorOOSIsotonic()
     for number, fold in enumerate(folds):
         train_frame = frame.iloc[fold.train_start:fold.train_end]
-        train_x, train_y = make_supervised_dataset(train_frame, horizon_bars=horizon_bars)
+        train_x, train_y = make_supervised_dataset(train_frame, horizon_bars=horizon_bars, feature_names=all_x.columns)
         test_start = frame.index[fold.test_start]
         test_end = frame.index[fold.test_end - 1]
         test_x = all_x.loc[(all_x.index >= test_start) & (all_x.index <= test_end)]
@@ -213,9 +251,10 @@ def run_catboost_purged_oos_evaluation(
         train_net = all_net_returns.loc[train_x.index]
         long_net = test_net["long_net_return"].to_numpy(dtype=float)
         short_net = test_net["short_net_return"].to_numpy(dtype=float)
-        realized_return = np.where(test_y.to_numpy() == 0, short_net, long_net)
+        realized_return = realized_class_net_return(test_y.to_numpy(), long_net, short_net)
         class_mean_return = {
-            label: float((train_net["short_net_return"] if label == 0 else train_net["long_net_return"])[train_y == label].mean())
+            label: float(train_net["short_net_return"][train_y == label].mean()) if label == 0 else
+            float(train_net["long_net_return"][train_y == label].mean()) if label == 2 else 0.0
             for label in class_ids
         }
         expected_return = sum(probability_by_class.get(label, 0.0) * class_mean_return[label] for label in class_ids)

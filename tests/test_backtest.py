@@ -39,13 +39,20 @@ class BacktestTests(unittest.TestCase):
         raw = make_market_data(4)
         validated = validate_market_data(raw)
         resampled = resample_market_data(validated, "1min")
-        self.assertEqual(len(resampled), 3)
+        self.assertEqual(len(resampled), 2)
         self.assertEqual(int(resampled["funding_rate"].notna().sum()), 0)
 
         raw = make_market_data(120)
         resampled = resample_market_data(validate_market_data(raw), "1min")
         self.assertEqual(int(resampled["funding_rate"].notna().sum()), 1)
 
+    def test_resample_rejects_upsampling_and_uses_start_bucket_labels(self) -> None:
+        raw = make_market_data(4)
+        validated = validate_market_data(raw)
+        with self.assertRaisesRegex(ValueError, "upsampling"):
+            resample_market_data(validated, "15s")
+        resampled = resample_market_data(validated, "1min")
+        self.assertEqual(list(resampled.index), [validated.index[0], validated.index[2]])
     def test_forward_filled_funding_is_rejected(self) -> None:
         raw = make_market_data(5)
         raw.loc[1, "funding_rate"] = 0.001
@@ -94,6 +101,23 @@ class BacktestTests(unittest.TestCase):
         time_exits = result.trades[result.trades["exit_reason"] == "time_exit"]
         self.assertGreater(len(time_exits), 0)
         self.assertTrue((time_exits["bars_held"] == 3).all())
+    def test_scheduled_time_exit_precedes_exit_bar_intrabar_stop(self) -> None:
+        raw = make_market_data(rows=80)
+        # The first warm-up-complete long enters at bar 30, so bar 33 is the
+        # scheduled exit open for a three-bar horizon. Its low must not rewrite
+        # that already-scheduled exit as an intrabar stop.
+        raw.loc[4, "low"] = raw.loc[4, "open"] * 0.5
+        result = run_backtest(
+            raw,
+            config=BacktestConfig(max_holding_bars=3),
+            timeframe="30s",
+            signal_fn=lambda row, config: (0.9, 1),
+        )
+        first = result.trades.iloc[0]
+        self.assertEqual(first["exit_reason"], "time_exit")
+        self.assertEqual(first["entry_time"], result.equity_curve.index[1])
+        self.assertEqual(first["exit_time"], result.equity_curve.index[4])
+        self.assertEqual(first["exit_ref_price"], raw.loc[4, "open"])
     def test_gap_beyond_liquidation_is_recorded(self) -> None:
         raw = make_market_data()
         raw.loc[35, ["open", "high", "low", "close"]] = [50.0, 51.0, 30.0, 50.0]

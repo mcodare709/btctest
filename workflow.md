@@ -147,3 +147,13 @@ git -c safe.directory=D:/BTC diff --check
 ```
 
 目前驗證基線：2026-09-08，26/26 tests passed。資料檔、模型產物與 outputs 不提交 Git；程式、測試、設定與可重跑腳本提交至 `main`。
+
+## 9. 2026-09-08 Protocol Corrections
+
+- `resample_market_data()` only down-samples regular bars; 1m -> 30s is rejected. Buckets are left-closed and start-labeled.
+- `train-model` infers source frequency from timestamp deltas. A declared timeframe mismatch fails; model metadata uses inferred frequency.
+- `backtest --model` requires explicit `--timeframe` and `--horizon-bars` and validates both against artifact metadata.
+- Scheduled `time_exit` executes at the scheduled bar open before that bar intrabar path. Liquidation uses aligned Mark Price fields when provided, otherwise an explicit contract-price fallback.
+- CatBoost feature artifacts store a selected manifest. Inference preserves missing values as `NaN`.
+- OOS Flat is no-trade with zero realized/expected net return. Benchmarks are replayed through the cost-aware engine.
+- Free Kline columns `quote_volume`, `trade_count`, `taker_buy_quote` are retained. For true 30s studies, download `aggTrades` and run `scripts\build_aggtrade_30s_dataset.py`; never upsample 1m bars.
