@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from btc_perp.evaluation import calibration_metrics, expected_return_calibration, purged_walk_forward_splits
+from btc_perp.evaluation import calibration_metrics, chronological_train_validation_indices, expected_return_calibration, purged_walk_forward_splits
 
 
 class EvaluationTests(unittest.TestCase):
@@ -15,6 +15,16 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(fold.purge_end, fold.test_start)
             self.assertLessEqual(fold.train_end, fold.purge_start)
             self.assertLess(fold.purge_end, fold.test_end)
+
+    def test_train_validation_split_purges_next_open_horizon(self) -> None:
+        fit_end, validation_start = chronological_train_validation_indices(
+            100,
+            horizon_bars=10,
+            validation_fraction=0.2,
+        )
+        self.assertEqual(validation_start, 80)
+        self.assertEqual(fit_end, 69)
+        self.assertEqual(validation_start - fit_end, 11)
 
     def test_calibration_metrics(self) -> None:
         result = calibration_metrics(np.array([0.0, 1.0]), np.array([0.0, 1.0]))

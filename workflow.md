@@ -108,13 +108,21 @@ CatBoost 維持三分類 baseline。artifact metadata 綁定：
 
 評估順序：
 
-1. 使用 `purged_walk_forward_splits()`，purge 至少等於 label horizon。
+1. 使用 purged_walk_forward_splits()；對 next-open、horizon h 的 target，train/validation/test 邊界至少保留 h + 1 個 purge rows。
 2. 每個 fold 只用過去資料訓練，僅保留未見未來的 OOS 預測。
 3. calibration 只使用先前 OOS fold，不使用當前或未來 test。
 4. replay OOS signal 到同一個 backtest engine。
 5. 輸出 class metrics、confidence buckets、calibration、feature importance、交易成本與 OOS trading metrics。
 
 執行入口請見 `btc_perp/cli.py`；OOS 研究實作位於 `btc_perp/oos.py`。
+
+### 5.1 Expected-return 與 RL 實驗擴充
+
+- expected_return.py 與 return_policy.py 以單一 gross forecast 推導 long/short net return，保留成本與 missing-value 語意。
+- 所有模型訓練先切 chronological fit/validation；fit 與 validation 之間保留 horizon_bars + 1 purge rows。
+- walk_forward_return_models.py、walk_forward_accuracy.py 與 compare_return_models.py 的 OOS test 不參與 CatBoost eval_set 或 best-iteration 選擇。
+- rl_env.py 是 dependency-free execution environment；gym_env.py 只提供 Gymnasium adapter。smoke_rl_env.py 可做 deterministic smoke test。
+- RL/expected-return 結果仍屬研究實驗；需在多 fold OOS、成本、benchmark 與 regime 分析完成後才可解讀。
 
 ## 6. 已完成工程項目
 
@@ -145,8 +153,7 @@ CatBoost 維持三分類 baseline。artifact metadata 綁定：
 conda run -n llm python -m unittest discover -s tests -v
 git -c safe.directory=D:/BTC diff --check
 ```
-
-目前驗證基線：2026-09-08，26/26 tests passed。資料檔、模型產物與 outputs 不提交 Git；程式、測試、設定與可重跑腳本提交至 `main`。
+目前驗證基線：2026-09-09，77/77 tests passed。資料檔、模型產物與 outputs 不提交 Git；程式、測試、設定與可重跑腳本提交至 main。
 
 ## 9. 2026-09-08 Protocol Corrections
 

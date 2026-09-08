@@ -16,6 +16,27 @@ class WalkForwardFold:
     test_start: int
     test_end: int
 
+def chronological_train_validation_indices(
+    rows: int,
+    *,
+    horizon_bars: int,
+    validation_fraction: float = 0.2,
+) -> tuple[int, int]:
+    """Return fit end and validation start with an h+1 purge gap."""
+
+    if rows <= 0:
+        raise ValueError("rows must be positive")
+    if horizon_bars <= 0:
+        raise ValueError("horizon_bars must be positive")
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    validation_start = int(rows * (1.0 - validation_fraction))
+    purge_bars = horizon_bars + 1
+    fit_end = validation_start - purge_bars
+    if fit_end <= 0 or validation_start >= rows:
+        raise ValueError("split does not leave fit, purge, and validation rows")
+    return fit_end, validation_start
+
 
 def purged_walk_forward_splits(
     rows: int, *, train_bars: int, test_bars: int, purge_bars: int, step_bars: int | None = None

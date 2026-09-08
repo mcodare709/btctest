@@ -9,6 +9,8 @@
 - 可解釋的 rule-based baseline，輸出 `prob_up` 與 Long/Short/Flat。
 - 成本感知 baseline：只有預估毛邊際扣除雙邊 fee、slippage、spread 後仍超過安全緩衝才交易。
 - 可選 CatBoost 三分類模型（down/flat/up），標籤先扣除估計交易成本；模型檔不存在時不會假裝使用 ML。
+- 預期淨報酬模型與 return-gate 實驗，沿用相同的 next-open 成本語意。
+- 可選 Gymnasium / Stable-Baselines3 RL portfolio environment；RL 結果僅作實驗，不代表策略證據。
 - 下一根 K 棒開盤執行，避免用收盤訊號偷看未來。
 - 以單筆風險反推名目倉位，並受 leverage cap 限制。
 - 手續費、滑價、spread、funding、停損、持有時間、maintenance margin / liquidation event。
@@ -23,7 +25,22 @@
 conda run -n llm python -m unittest discover -s tests -v
 ```
 
-不需要額外安裝 sklearn。CatBoost 是可選依賴：`conda run -n llm python -m pip install -e ".[ml]"`。必須先在時間序列 walk-forward split 上比較成本後表現，不能直接把訓練集結果當成策略證據。
+基礎套件包含 requests 與 scikit-learn。CatBoost 是可選依賴；RL 實驗另需 Gymnasium、Stable-Baselines3 與 sb3-contrib：`conda run -n llm python -m pip install -e ".[ml,rl]"`。
+必須先在時間序列 walk-forward split 上比較成本後表現，不能直接把訓練集結果當成策略證據。
+
+## 專案結構
+
+btc_perp/       核心資料、特徵、回測、模型與 RL environment
+cpp/            C++ strategy core
+dashboard/      本地 paper-trading dashboard
+scripts/        可重跑的資料、模型、OOS、RL 腳本
+tests/          單元與環境 contract tests
+reports/        研究協議與人工審閱文件
+data/           本機市場資料，已忽略
+outputs/        本機生成物，依 models/reports/logs/snapshots 分類，已忽略
+build/, tools/  本機編譯與工具，已忽略
+
+根目錄的 .btc_paper_state.json 與 .bak 是 dashboard runtime state，刻意保留原位以符合現有啟動路徑。
 
 ## 資料格式
 
@@ -79,7 +96,13 @@ conda run -n llm python -m btc_perp.cli compare `
   --output-dir .\outputs\comparison
 ```
 
-輸出包含 `summary.json`、`equity_curve.csv`、`trades.csv`。沒有真實歷史資料時，可先產生只用於 smoke test 的 synthetic CSV：
+輸出包含 summary.json、equity_curve.csv、trades.csv。模型與研究報告的預設生成位置分別是 outputs\models 與 outputs\reports；執行日誌放在 outputs\logs。
+
+RL environment smoke test：
+
+conda run -n llm python scripts\smoke_rl_env.py
+
+沒有真實歷史資料時，可先產生只用於 smoke test 的 synthetic CSV：
 
 ```powershell
 conda run -n llm python -m btc_perp.synthetic --output .\examples\synthetic_30s.csv

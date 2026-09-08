@@ -16,6 +16,7 @@ import pandas as pd
 
 from .config import BacktestConfig
 from .data import validate_market_data
+from .evaluation import chronological_train_validation_indices
 from .features import build_features
 from .protocol import EXECUTION_PROTOCOL_VERSION, infer_timeframe, net_horizon_returns
 
@@ -255,8 +256,10 @@ def train_catboost(
     x, y = make_supervised_dataset(validated_data, horizon_bars=horizon_bars)
     if len(x) < 100 or y.nunique() < 3:
         raise ValueError("training data must contain at least 100 rows and all three target classes")
-    split = int(len(x) * 0.8)
-    train_end = max(split - horizon_bars, 1)
+    train_end, validation_start = chronological_train_validation_indices(
+        len(x),
+        horizon_bars=horizon_bars,
+    )
     model = classifier(
         loss_function="MultiClass",
         iterations=iterations,
@@ -266,7 +269,7 @@ def train_catboost(
         verbose=False,
         allow_writing_files=False,
     )
-    model.fit(x.iloc[:train_end], y.iloc[:train_end], eval_set=(x.iloc[split:], y.iloc[split:]), verbose=False)
+    model.fit(x.iloc[:train_end], y.iloc[:train_end], eval_set=(x.iloc[validation_start:], y.iloc[validation_start:]), verbose=False)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(str(path))
@@ -291,8 +294,8 @@ def train_catboost(
         "horizon_bars": horizon_bars,
         "target_classes": {"0": "down", "1": "flat", "2": "up"},
         "train_rows": train_end,
-        "purged_rows": split - train_end,
-        "validation_rows": len(x) - split,
+        "purged_rows": validation_start - train_end,
+        "validation_rows": len(x) - validation_start,
         "catboost_parameters": {"iterations": iterations, "depth": depth, "learning_rate": learning_rate, "random_seed": 42},
     }
     path.with_suffix(".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
