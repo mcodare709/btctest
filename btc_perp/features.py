@@ -50,7 +50,7 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
         denominator = (result["bid_size"] + result["ask_size"]).replace(0, np.nan)
         result["order_book_imbalance"] = (result["bid_size"] - result["ask_size"]) / denominator
     else:
-        result["order_book_imbalance"] = 0.0
+        result["order_book_imbalance"] = np.nan
 
     if {"taker_buy_volume", "taker_sell_volume"}.issubset(result.columns):
         denominator = (result["taker_buy_volume"] + result["taker_sell_volume"]).replace(0, np.nan)
@@ -58,9 +58,9 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
         result["cvd"] = (result["taker_buy_volume"] - result["taker_sell_volume"]).cumsum()
         result["cvd_change"] = result["cvd"].diff()
     else:
-        result["trade_imbalance"] = 0.0
-        result["cvd"] = 0.0
-        result["cvd_change"] = 0.0
+        result["trade_imbalance"] = np.nan
+        result["cvd"] = np.nan
+        result["cvd_change"] = np.nan
 
     if {"bid_price", "ask_price", "close"}.issubset(result.columns):
         result["spread_bps"] = (result["ask_price"] - result["bid_price"]) / close * 10_000
@@ -70,26 +70,30 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     if "open_interest" in result.columns:
         result["oi_change"] = result["open_interest"].pct_change()
     else:
-        result["oi_change"] = 0.0
+        result["oi_change"] = np.nan
 
     if "liquidation_volume" in result.columns:
         result["liquidation_ratio"] = result["liquidation_volume"] / volume.replace(0, np.nan)
     else:
-        result["liquidation_ratio"] = 0.0
+        result["liquidation_ratio"] = np.nan
 
     if "long_short_ratio" in result.columns:
         result["long_short_log_ratio"] = np.log(result["long_short_ratio"].clip(lower=1e-12))
     else:
-        result["long_short_log_ratio"] = 0.0
+        result["long_short_log_ratio"] = np.nan
 
     if "funding_rate" not in result.columns:
         result["funding_rate"] = np.nan
-    # Preserve missing feeds as NaN and expose their availability explicitly.
-    result["has_orderbook"] = int({"bid_price", "ask_price", "bid_size", "ask_size"}.issubset(result.columns))
-    result["has_open_interest"] = int("open_interest" in result.columns)
-    result["has_liquidation"] = int("liquidation_volume" in result.columns)
-    result["has_long_short_ratio"] = int("long_short_ratio" in result.columns)
-    result["has_funding"] = int("funding_rate" in result.columns)
+    # Per-row indicators distinguish an absent observation from a real zero.
+    result["has_orderbook"] = (
+        result[["bid_price", "ask_price", "bid_size", "ask_size"]].notna().all(axis=1).astype(int)
+        if {"bid_price", "ask_price", "bid_size", "ask_size"}.issubset(result.columns)
+        else 0
+    )
+    result["has_open_interest"] = result["open_interest"].notna().astype(int) if "open_interest" in result.columns else 0
+    result["has_liquidation"] = result["liquidation_volume"].notna().astype(int) if "liquidation_volume" in result.columns else 0
+    result["has_long_short_ratio"] = result["long_short_ratio"].notna().astype(int) if "long_short_ratio" in result.columns else 0
+    result["has_funding"] = result["funding_rate"].notna().astype(int)
     result["latest_known_funding_rate"] = result["funding_rate"].ffill()
     result["funding_change"] = result["latest_known_funding_rate"].diff()
     result["funding_zscore"] = (result["latest_known_funding_rate"] - result["latest_known_funding_rate"].rolling(100, min_periods=20).mean()) / result["latest_known_funding_rate"].rolling(100, min_periods=20).std().replace(0, np.nan)

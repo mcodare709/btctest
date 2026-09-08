@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from btc_perp.config import BacktestConfig
+from btc_perp.features import build_features
 from btc_perp.ml_model import EXECUTION_PROTOCOL_VERSION, MODEL_FEATURES, CatBoostBundle, make_supervised_dataset
 from btc_perp.signals import cost_aware_baseline_signal
 
@@ -37,6 +38,22 @@ def make_market_data(rows: int = 180) -> pd.DataFrame:
 
 
 class MLModelTests(unittest.TestCase):
+    def test_absent_optional_feeds_remain_missing_and_unavailable(self) -> None:
+        frame = make_market_data().drop(
+            columns=["bid_price", "ask_price", "bid_size", "ask_size", "taker_buy_volume", "taker_sell_volume"]
+        )
+        features = build_features(frame)
+        self.assertTrue(features["order_book_imbalance"].isna().all())
+        self.assertTrue(features["funding_rate"].isna().all())
+        self.assertEqual(features["has_orderbook"].iloc[0], 0)
+        self.assertEqual(features["has_funding"].iloc[0], 0)
+
+        frame["funding_rate"] = np.nan
+        frame.loc[1, "funding_rate"] = 0.0001
+        partial = build_features(frame)
+        self.assertEqual(partial["has_funding"].iloc[0], 0)
+        self.assertEqual(partial["has_funding"].iloc[1], 1)
+
     def test_supervised_labels_are_forward_only_and_cost_banded(self) -> None:
         x, y = make_supervised_dataset(make_market_data(), horizon_bars=10)
         self.assertEqual(tuple(x.columns), MODEL_FEATURES)
